@@ -1,0 +1,12 @@
+// 共用元件（取色器、字体下拉、框层）的三语字串。键名与网站字典同名、字面逐字相同：
+//   网站里由 SiteStudioTBridge 先查网站字典（行为与搬家前一样），游客版查这里。改字面要两边一起改。
+
+import type { StudioDict } from '../types'
+
+const TW = { bf_colorpicker_red: '紅', bf_colorpicker_orange: '橙', bf_colorpicker_yellow: '黃', bf_colorpicker_green: '綠', bf_colorpicker_blue: '藍', bf_colorpicker_purple: '紫', bf_colorpicker_black: '黑', bf_colorpicker_white: '白', cancel: '取消', confirm: '確定', cp_aria_picker: '顏色選取', cp_common_colors: '常用', cp_invalid_color: '顏色格式不合法', cp_kind_bg: '底色', cp_kind_box: '外框', cp_kind_text: '文字', font_pick_title: '選擇字體', font_default: '預設字體', font_group_sc: '簡體中文', font_group_tc: '繁體中文', font_group_latin: '英文', frame_layer_z_up: '上移一層', frame_layer_z_down: '下移一層', frame_layer_z_top: '移到最頂', frame_layer_z_bottom: '移到最底', frame_layer_rotate_hint: '拖動旋轉（Shift 每 15° 一格）' }
+type K = keyof typeof TW
+const CN: Record<K, string> = { bf_colorpicker_red: '红', bf_colorpicker_orange: '橙', bf_colorpicker_yellow: '黄', bf_colorpicker_green: '绿', bf_colorpicker_blue: '蓝', bf_colorpicker_purple: '紫', bf_colorpicker_black: '黑', bf_colorpicker_white: '白', cancel: '取消', confirm: '确定', cp_aria_picker: '颜色选取', cp_common_colors: '常用', cp_invalid_color: '颜色格式不合法', cp_kind_bg: '底色', cp_kind_box: '外框', cp_kind_text: '文字', font_pick_title: '选择字体', font_default: '默认字体', font_group_sc: '简体中文', font_group_tc: '繁体中文', font_group_latin: '英文', frame_layer_z_up: '上移一层', frame_layer_z_down: '下移一层', frame_layer_z_top: '移到最顶', frame_layer_z_bottom: '移到最底', frame_layer_rotate_hint: '拖动旋转（Shift 每 15° 一格）' }
+const EN: Record<K, string> = { bf_colorpicker_red: 'Red', bf_colorpicker_orange: 'Orange', bf_colorpicker_yellow: 'Yellow', bf_colorpicker_green: 'Green', bf_colorpicker_blue: 'Blue', bf_colorpicker_purple: 'Purple', bf_colorpicker_black: 'Black', bf_colorpicker_white: 'White', cancel: 'Cancel', confirm: 'OK', cp_aria_picker: 'Color picker', cp_common_colors: 'Common', cp_invalid_color: 'Invalid color format', cp_kind_bg: 'Highlight', cp_kind_box: 'Box', cp_kind_text: 'Text', font_pick_title: 'Choose font', font_default: 'Default font', font_group_sc: 'Simplified Chinese', font_group_tc: 'Traditional Chinese', font_group_latin: 'Latin', frame_layer_z_up: 'Bring forward', frame_layer_z_down: 'Send backward', frame_layer_z_top: 'Bring to front', frame_layer_z_bottom: 'Send to back', frame_layer_rotate_hint: 'Drag to rotate (Shift snaps every 15°)' }
+
+export const STUDIO_COMPONENT_I18N: StudioDict<K> = { 'zh-TW': TW, 'zh-CN': CN, en: EN }
+export type StudioComponentKey = K

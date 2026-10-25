@@ -1,0 +1,32 @@
+Dilin Studio · slides — notices for code adapted from presenton
+================================================================
+
+Upstream:  presenton — https://github.com/presenton/presenton
+License:   Apache License, Version 2.0 (full text: ./LICENSE, copied verbatim
+           from upstream at commit b5fcb91a12473f39ee94445f462155af5bf5854c)
+Copyright: Copyright 2025 presenton
+
+Files in this directory tree that are adapted from presenton (Apache-2.0 §4(b):
+each file's header states what was taken and what was changed):
+
+  slides/kit/layouts/cover.tsx
+  slides/kit/layouts/contents.tsx
+  slides/kit/layouts/transition.tsx
+  slides/kit/layouts/content.tsx
+  slides/kit/layouts/end.tsx
+  slides/kit/components/blueprints.ts
+  slides/kit/types.ts
+
+What was taken: the visual starting point of a number of presenton slide
+layouts (arrangement of title / text / image regions). What was changed:
+rewritten as React components on a 1000 x 562.5 coordinate system, slot-based
+data contract, Chinese typesetting, decorative accent lines removed, plus
+original layouts. No presenton source file is included unmodified.
+
+About the upstream NOTICE file (Apache-2.0 §4(d)):
+presenton's own NOTICE file (same commit, 1,274,338 bytes) consists only of
+the license texts of the third-party Python and npm packages bundled in
+presenton's application image (e.g. aioquic, passlib, CPython). It contains no
+attribution notice for presenton itself, and none of those packages is part of
+the files listed above. Under §4(d) only notices that pertain to the
+Derivative Work must be carried, so no part of it is reproduced here.

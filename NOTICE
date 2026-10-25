@@ -1,0 +1,17 @@
+Dilin Studio
+Copyright 2026 Dilin AI (https://dilinai.com)
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The names "Dilin", "Dilin AI", "Dilin Studio", "堤麟" and "堤麟AI", and their logos
+(including public/logo.png and public/favicon.ico), are trademarks of Dilin AI.
+As section 6 of the license says, the license does not grant permission to use them,
+except as needed to describe where this work comes from.
+
+This product includes third-party material under its own licenses:
+  - src/studio/*/THIRD_PARTY.md lists every third-party package, algorithm and asset;
+  - public/drawboard-app/licenses/ holds the paint engine's third-party license texts;
+  - public/vedit/licenses/ holds the video editor's third-party license texts.
+
+The icons in public/icons/neon/ were made by this project and are licensed with it
+(public/icons/neon/ 圖示為本專案自製，隨本專案授權).

@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>堤麟畫板</title>
+<link rel="stylesheet" href="style.css?v=eba217c078">
+</head>
+<body>
+
+<!-- ───────── 顶栏：菜单 + 语言 ───────── -->
+<div id="menubar">
+  <div class="brand" data-i18n="ui.brand">堤麟畫板</div>
+  <!-- 顶菜单整排由 menubar.js 照 PS／AI 的菜单树生成（menus/*.js）；像素层＝PS、矢量层＝AI -->
+  <div class="spacer"></div>
+  <div id="agentHint" title="">⌁ <span data-i18n="ui.agentReady"></span></div>
+  <select id="langSel">
+    <option value="zh-Hant">繁體中文</option>
+    <option value="zh-Hans">简体中文</option>
+    <option value="en">English</option>
+  </select>
+</div>
+
+<!-- ───────── 选项栏（随工具变） ───────── -->
+<div id="optionbar">
+  <span id="optToolName"></span>
+  <div id="optBody"></div>
+</div>
+
+<div id="main">
+
+  <!-- ───────── 左：工具栏（只放常用的） ───────── -->
+  <div id="toolbar">
+    <!-- 按钮由 ui.js 生成 -->
+  </div>
+
+  <!-- ───────── 中：画布 ───────── -->
+  <div id="stage">
+    <div id="canvasWrap">
+      <canvas id="view"></canvas>
+    </div>
+    <div id="statusbar">
+      <span id="stZoom">100%</span>
+      <span id="stSize"></span>
+      <span id="stPos">—</span>
+      <span class="spacer"></span>
+      <span id="stLayer"></span>
+    </div>
+  </div>
+
+  <!-- ───────── 右：图层面板 ───────── -->
+  <div id="rightpanel">
+    <!-- 标题改成两颗分页钮（图层｜历史记录），切换由 menus/impl/rp-tabs.js 管 -->
+    <div class="rptabs" id="rpTabs">
+      <button type="button" class="rptab on" data-tab="layers"><span data-i18n="panel.layers"></span></button>
+      <button type="button" class="rptab" data-tab="history">历史记录</button>
+    </div>
+    <div class="rppane dlp-b" id="rpHistory" style="display:none"></div>
+    <div class="rppane" id="rpLayers">
+    <div class="layerops">
+      <select id="blendSel"></select>
+      <label><span data-i18n="panel.opacity"></span>
+        <input id="opacityRange" type="range" min="0" max="100" value="100">
+        <span id="opacityVal">100</span>
+      </label>
+    </div>
+    <!-- 锁定：照 PS 图层面板四颗（透明像素／图像像素／位置／全部）；按钮只叫 ps.layer.lockLayers，图示由 ui.js 从 icons.js 填 -->
+    <div class="lockrow" id="lockRow">
+      <span data-i18n="panel.lock"></span>
+      <button type="button" class="lockbtn" data-lock="transparency" data-i18n-title="lock.transparency"></button>
+      <button type="button" class="lockbtn" data-lock="pixels" data-i18n-title="lock.pixels"></button>
+      <button type="button" class="lockbtn" data-lock="position" data-i18n-title="lock.position"></button>
+      <button type="button" class="lockbtn" data-lock="all" data-i18n-title="lock.all"></button>
+    </div>
+    <div id="layerList"></div>
+    <div class="layerbtns">
+      <button data-cmd="layer.newRaster" title="" data-i18n-title="cmd.layer.newRaster">▣</button>
+      <button data-cmd="layer.newVector" title="" data-i18n-title="cmd.layer.newVector">✎</button>
+      <button data-cmd="layer.duplicate" title="" data-i18n-title="cmd.edit.duplicate">⧉</button>
+      <button data-cmd="layer.delete"    title="" data-i18n-title="cmd.layer.delete">🗑</button>
+    </div>
+    </div>
+
+    <div class="ph" style="margin-top:10px"><span data-i18n="panel.color"></span></div>
+    <div class="colorrow">
+      <label><span data-i18n="panel.fill"></span><input type="color" id="fillColor" value="#e8573f"></label>
+      <label><span data-i18n="panel.stroke"></span><input type="color" id="strokeColor" value="#ffffff"></label>
+      <label><span data-i18n="panel.strokeW"></span><input type="number" id="strokeW" value="0" min="0" max="200" step="1"></label>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept="image/*" style="display:none">
+<input type="file" id="projInput" accept=".dlcanvas,application/json" style="display:none">
+
+<script src="i18n.js?v=6a1f4280ee"></script>
+<script src="engine.js?v=6d24c34549"></script>
+<script src="humanlock.js?v=98bf5b72d7"></script>
+<!-- 左侧工具栏：图示库 + PS／AI 两套版面 + 画工具栏的本体（照抄 PS／AI 左侧工具栏） -->
+<script src="icons.js?v=7d17c02555"></script>
+<script src="toolbar-layout.js?v=3060b99f55"></script>
+<!-- 工具：一颗一支档，各自向 tools/_registry.js 登记；加工具＝加一支档＋加一行 script -->
+<script src="tools/_registry.js?v=1b180ab010"></script>
+<script src="tools/_vecsel.js?v=4ababcba85"></script>
+<script src="tools/move.js?v=9e742cbc3d"></script>
+<script src="tools/direct.js?v=934cc5bf44"></script>
+<script src="tools/addanchor.js?v=dd56ba3216"></script>
+<script src="tools/delanchor.js?v=acf2f52c9e"></script>
+<script src="tools/anchorpoint.js?v=16ea2a22fb"></script>
+<script src="tools/scissors.js?v=27d2dae079"></script>
+<script src="tools/marquee.js?v=811679b2c3"></script>
+<script src="tools/brush.js?v=48d5476c50"></script>
+<script src="tools/eraser.js?v=9da212b41f"></script>
+<script src="tools/bucket.js?v=b9ef98bc26"></script>
+<script src="tools/clone.js?v=3be83b45d5"></script>
+<script src="tools/pencil.js?v=65fdafd72f"></script>
+<script src="tools/spotheal.js?v=5b13c444dc"></script>
+<script src="tools/heal.js?v=5c366d2dbf"></script>
+<script src="tools/historybrush.js?v=198eb0c4f2"></script>
+<script src="tools/blur.js?v=583e1664de"></script>
+<script src="tools/sharpen.js?v=08d68cb418"></script>
+<script src="tools/smudge.js?v=8e498b9be0"></script>
+<script src="tools/dodge.js?v=4910e89820"></script>
+<script src="tools/burn.js?v=03d76f53e3"></script>
+<script src="tools/sponge.js?v=86a0f31b02"></script>
+<script src="tools/mixer.js?v=d7c7cb8f19"></script>
+<script src="tools/colorreplace.js?v=a5036b624c"></script>
+<script src="tools/quickselect.js?v=f49b90209c"></script>
+<script src="tools/objectselect.js?v=1334e99eae"></script>
+<script src="tools/marqueerow.js?v=9f4890de68"></script>
+<script src="tools/marqueecol.js?v=afb29d6e53"></script>
+<script src="tools/magneticlasso.js?v=88274faf99"></script>
+<script src="tools/ruler.js?v=010b9bfa48"></script>
+<script src="tools/note.js?v=d371526b2e"></script>
+<script src="tools/count.js?v=bd5464d2ca"></script>
+<script src="tools/colorsampler.js?v=79bd9adb24"></script>
+<script src="tools/slice.js?v=e50217dbff"></script>
+<script src="tools/sliceselect.js?v=b69993e0f7"></script>
+<script src="tools/artboard.js?v=00792ad7d0"></script>
+<script src="tools/frame.js?v=f53f23926a"></script>
+<script src="tools/patch.js?v=6eb3345881"></script>
+<script src="tools/contentmove.js?v=388c86ce3b"></script>
+<script src="tools/redeye.js?v=1085ee1004"></script>
+<script src="tools/patternstamp.js?v=e11b29b218"></script>
+<script src="tools/arthistory.js?v=905b43f8f7"></script>
+<script src="tools/pathselect.js?v=79cb82147b"></script>
+<script src="tools/customshape.js?v=2d3c449260"></script>
+<script src="tools/freeformpen.js?v=7a76c0f790"></script>
+<script src="tools/curvaturepen.js?v=cabc9a1c4c"></script>
+<script src="tools/typev.js?v=4bd78acd7a"></script>
+<script src="tools/typemaskh.js?v=a25d8ab14a"></script>
+<script src="tools/typemaskv.js?v=c9ab64394c"></script>
+<script src="tools/rotateview.js?v=07cb0bdc05"></script>
+<script src="tools/cropperspective.js?v=bee2efb085"></script>
+<script src="tools/material3d.js?v=66fc1950b9"></script>
+<script src="tools/drop3d.js?v=a7148b452b"></script>
+<!-- AI 版面 61 颗 -->
+<script src="tools/groupselect.js?v=6a99ff1448"></script>
+<script src="tools/typearea.js?v=d2001fedea"></script>
+<script src="tools/typepath.js?v=b6084ae240"></script>
+<script src="tools/vtype.js?v=be76254f80"></script>
+<script src="tools/vtypearea.js?v=322e2c10e0"></script>
+<script src="tools/vtypepath.js?v=44cfa86a88"></script>
+<script src="tools/touchtype.js?v=c94bf4caad"></script>
+<script src="tools/aicurvature.js?v=7346e3e186"></script>
+<script src="tools/arc.js?v=1ed4196c46"></script>
+<script src="tools/spiral.js?v=e4b40ab29f"></script>
+<script src="tools/rectgrid.js?v=ab9d13ed6d"></script>
+<script src="tools/polargrid.js?v=4dfdafd838"></script>
+<script src="tools/flare.js?v=c6b86e58e6"></script>
+<script src="tools/blobbrush.js?v=afd738c237"></script>
+<script src="tools/shaper.js?v=a8c875777a"></script>
+<script src="tools/aipencil.js?v=6ebe61ae06"></script>
+<script src="tools/smooth.js?v=906cf2ef6d"></script>
+<script src="tools/patheraser.js?v=ac080a3cd3"></script>
+<script src="tools/join.js?v=8e567c999f"></script>
+<script src="tools/knife.js?v=8fa57a9b59"></script>
+<script src="tools/reflect.js?v=bcb7f4ef18"></script>
+<script src="tools/shear.js?v=f9185fe7be"></script>
+<script src="tools/reshape.js?v=acce65a07a"></script>
+<script src="tools/freetransform.js?v=d4251efc52"></script>
+<script src="tools/aiselect.js?v=65f853540e"></script>
+<script src="tools/puppetwarp.js?v=d13ed7aabd"></script>
+<script src="tools/width.js?v=3fe38dfced"></script>
+<script src="tools/warp.js?v=b867b18b3a"></script>
+<script src="tools/twirl.js?v=7d3b72c3cc"></script>
+<script src="tools/pucker.js?v=0a12b4ab88"></script>
+<script src="tools/bloat.js?v=4a9b6f2c43"></script>
+<script src="tools/scallop.js?v=3cc69cc850"></script>
+<script src="tools/crystallize.js?v=8a502db834"></script>
+<script src="tools/wrinkle.js?v=0443e8b09e"></script>
+<script src="tools/shapebuilder.js?v=0de2e2b7ad"></script>
+<script src="tools/livepaint.js?v=8f0c5be729"></script>
+<script src="tools/livepaintselect.js?v=3fd4adb818"></script>
+<script src="tools/perspgrid.js?v=b081784a1a"></script>
+<script src="tools/perspselect.js?v=e068943b37"></script>
+<script src="tools/measure.js?v=711c69cea9"></script>
+<script src="tools/blend.js?v=f0866bb772"></script>
+<script src="tools/symspray.js?v=0115c8064a"></script>
+<script src="tools/symshift.js?v=c189be4cd1"></script>
+<script src="tools/symscrunch.js?v=e405bfc6c4"></script>
+<script src="tools/symsize.js?v=dbf6faac78"></script>
+<script src="tools/symspin.js?v=91d7e9a298"></script>
+<script src="tools/symstain.js?v=0817c2ac3f"></script>
+<script src="tools/symscreen.js?v=8c9d66df80"></script>
+<script src="tools/symstyle.js?v=49840ae64b"></script>
+<script src="tools/graphcolumn.js?v=4fdb30fe4d"></script>
+<script src="tools/graphstackcolumn.js?v=3ea3655df1"></script>
+<script src="tools/graphbar.js?v=9b57f1a063"></script>
+<script src="tools/graphstackbar.js?v=d1d4629056"></script>
+<script src="tools/graphline.js?v=4ee0a77283"></script>
+<script src="tools/grapharea.js?v=09f98aafac"></script>
+<script src="tools/graphscatter.js?v=b4f8c927e2"></script>
+<script src="tools/graphpie.js?v=d8286507b1"></script>
+<script src="tools/graphradar.js?v=d76addac9d"></script>
+<script src="tools/aiartboard.js?v=a35a55488a"></script>
+<script src="tools/aislice.js?v=e9daa7a2d3"></script>
+<script src="tools/aisliceselect.js?v=a1a65c22d0"></script>
+<script src="tools/printtiling.js?v=e838a98634"></script>
+<script src="tools/pen.js?v=a5ab9095bf"></script>
+<script src="tools/rect.js?v=63bca8a117"></script>
+<script src="tools/ellipse.js?v=a8eadd9af7"></script>
+<script src="tools/star.js?v=e23ce09e66"></script>
+<script src="tools/text.js?v=480f800d40"></script>
+<script src="tools/eyedropper.js?v=9b411ed7c9"></script>
+<script src="tools/hand.js?v=7f3cae505b"></script>
+<script src="tools/zoom.js?v=6c383021fc"></script>
+<script src="tools/scrollbars.js?v=7662ff8209"></script>
+<!-- 直线段／套索／魔术棒／旋转／比例缩放／网格／渐变／裁剪 -->
+<script src="tools/line.js?v=fb78d6f164"></script>
+<script src="tools/wand.js?v=3b3421855d"></script>
+<script src="tools/lasso.js?v=f21f863c3b"></script>
+<script src="tools/gradient.js?v=7798c0e601"></script>
+<script src="tools/mesh.js?v=dc0cc84751"></script>
+<script src="tools/scale.js?v=64d03ebc86"></script>
+<script src="tools/rotate.js?v=0744efd97f"></script>
+<script src="tools/crop.js?v=2992eb0ec8"></script>
+<script src="toolbar.js?v=4ea6397fcb"></script>
+<!-- 顶菜单：树资料一个菜单一支档（照 ArtCraft 原码的菜单目录抄，三语照 PS／AI 中文版） -->
+<script src="menubar.js?v=9a7e7c5ae7"></script>
+<script src="menus/ps-file.js?v=3d201730ed"></script><script src="menus/ps-edit.js?v=ce91b21cab"></script><script src="menus/ps-image.js?v=6667994231"></script>
+<script src="menus/ps-layer.js?v=085baff43e"></script><script src="menus/ps-type.js?v=de8bc3e0ba"></script><script src="menus/ps-select.js?v=4384039d5d"></script>
+<script src="menus/ps-filter.js?v=e7eec2df22"></script><script src="menus/ps-view.js?v=e432025e62"></script><script src="menus/ps-window.js?v=1434d50d88"></script>
+<script src="menus/ai-file.js?v=75da34ba7f"></script><script src="menus/ai-edit.js?v=aa829657a0"></script><script src="menus/ai-object.js?v=d9784de079"></script>
+<script src="menus/ai-type.js?v=19c98d0672"></script><script src="menus/ai-select.js?v=35dd5dfa82"></script><script src="menus/ai-effect.js?v=6253913e83"></script>
+<script src="menus/ai-view.js?v=bbd1345178"></script><script src="menus/ai-window.js?v=3925533359"></script><script src="menus/ai-help.js?v=893ea4910d"></script>
+<!-- 菜单各项的实作（照原码抄；命令名 ps.<原码id>／ai.<原码id>） -->
+<script src="menus/impl/panels.js?v=370bfebee9"></script>
+<script src="menus/impl/cmyk-swop.js?v=5394d75e29"></script>
+<script src="menus/impl/ps-edit.js?v=15dcf2fa18"></script>
+<script src="menus/impl/clipboard.js?v=d1100f29fa"></script>
+<script src="menus/impl/ps-layer.js?v=cdd2f3c286"></script>
+<script src="menus/impl/ps-image.js?v=ef8a9cba54"></script>
+<script src="menus/impl/psd-io.js?v=96ff3f059f"></script>
+<script src="menus/impl/vec-io.js?v=8b10dec4e0"></script>
+<script src="menus/impl/raster-io.js?v=146a75a8ae"></script>
+<script src="menus/impl/jpeg-enc.js?v=a9671ff12c"></script>
+<script src="menus/impl/ps-file.js?v=d9f275674b"></script>
+<script src="menus/impl/ps-select.js?v=5d11d3d4e4"></script>
+<script src="menus/impl/ai-object.js?v=34e73eba79"></script>
+<script src="menus/impl/ai-select.js?v=da123a43d5"></script>
+<script src="menus/impl/ai-view.js?v=59f6595ffb"></script>
+<script src="menus/impl/ps-type.js?v=954970a42e"></script>
+<script src="menus/impl/ai-type.js?v=3ad7721034"></script>
+<script src="menus/impl/ps-filter.js?v=6433e588b9"></script>
+<script src="menus/impl/ps-automate.js?v=a6e6e46ce8"></script>
+<script src="menus/impl/ps-layer2.js?v=bd4c30c019"></script>
+<script src="menus/impl/ai-effect.js?v=999165c1d6"></script>
+<script src="menus/impl/ai-effect2.js?v=e1481d494d"></script>
+<script src="menus/impl/ai-edit.js?v=050ad6c54d"></script>
+<script src="menus/impl/ai-file.js?v=10dd9b4318"></script>
+<script src="menus/impl/ps-view.js?v=04705228c6"></script>
+<script src="menus/impl/ps-window.js?v=2bd90e5c8c"></script><script src="menus/impl/rp-tabs.js?v=de02e8d6f9"></script><script src="menus/impl/rp-layout.js?v=4dfdc42bc1"></script>
+<script src="menus/impl/ai-window.js?v=b782c1d499"></script>
+<script src="menus/impl/ai-libraries.js?v=0b76d9fb58"></script>
+<script src="menus/impl/ai-trace.js?v=2356cb3ad5"></script>
+<script src="menus/impl/ai-help.js?v=c976825567"></script>
+<script src="menus/impl/ps-file2.js?v=b2338112cf"></script>
+<script src="menus/impl/ai-misc.js?v=462f31b866"></script>
+<script src="menus/impl/obj-render.js?v=93f4a9a254"></script>
+<script src="menus/impl/ai-effect3d.js?v=1298e9f808"></script>
+<script src="tools/vecmode.js?v=883fb8bd22"></script>
+<script src="ui.js?v=c2ee35f40c"></script>
+<script src="tools/aiui.js?v=438a1a84f8"></script>
+<script src="tools/ctxmenu.js?v=e7994d9419"></script>
+<script src="tools/colorlibs.js?v=b69714e454"></script>
+<script src="tools/colorpicker.js?v=1462b3ee17"></script>
+<script src="menus/impl/docs.js?v=fe01de1d4c"></script>
+<!-- 堤麟网站接线（同步画板时插的·不属上游） -->
+<script src="site-bridge.js?v=ffb5227175"></script>
+</body>
+</html>

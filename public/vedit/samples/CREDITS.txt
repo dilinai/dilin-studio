@@ -1,0 +1,8 @@
+堤麟剪輯·編曲音色出處（網頁角落附署名）
+本夾的檔都由下列原始錄音轉檔、裁切、調音量而成（已修改）。檔名＝MIDI 音高編號（60＝中央 C）。
+
+piano/  Salamander Grand Piano V2 — Alexander Holm — CC BY 3.0（https://creativecommons.org/licenses/by/3.0/）
+        取自 Tone.js audio（https://github.com/Tonejs/audio/tree/master/salamander）
+dizi/   Flute Dizi C — Hypnotriod（Freesound pack 21613·https://freesound.org/people/Hypnotriod/packs/21613/）— CC0 1.0
+erhu/   aliexpress-erhu — sfzinstruments（https://github.com/sfzinstruments/aliexpress-erhu）— CC0 1.0
+zheng/  Dan Tranh（越南箏）— Versilian Community Sample Library / Sam Gossner（https://github.com/sgossner/VCSL）— CC0 1.0

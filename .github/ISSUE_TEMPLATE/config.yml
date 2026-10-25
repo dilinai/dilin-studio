@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全問題 / Security issue
+    url: https://github.com/dilinai/dilin-studio/security/advisories/new
+    about: 請勿公開開 issue，照 SECURITY.md 私下回報。 / Do not open a public issue; report privately as described in SECURITY.md.

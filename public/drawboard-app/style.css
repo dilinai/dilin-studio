@@ -1,0 +1,274 @@
+:root{
+  --bg:#1e1e1e; --bg2:#262626; --bg3:#2f2f2f; --line:#3a3a3a;
+  --fg:#d6d6d6; --fg2:#9a9a9a; --accent:#2f7fd8; --accentq:#3d8ee0;
+  --h:30px;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font:13px/1.4 -apple-system,"Noto Sans CJK TC","Microsoft JhengHei","PingFang TC",Segoe UI,sans-serif;
+  display:flex; flex-direction:column; overflow:hidden; user-select:none;
+}
+
+/* ───── 顶栏 ───── */
+#menubar{
+  height:var(--h); flex:0 0 auto; display:flex; align-items:stretch;
+  background:var(--bg2); border-bottom:1px solid var(--line);
+}
+#menubar .brand{
+  display:flex; align-items:center; padding:0 12px; font-weight:600;
+  color:#fff; letter-spacing:.5px;
+}
+#menubar .spacer{flex:1}
+.menu{position:relative; display:flex; align-items:center; padding:0 11px; cursor:default}
+.menu:hover{background:var(--bg3)}
+.menu.open{background:var(--accent); color:#fff}
+.dropdown{
+  display:none; position:absolute; top:100%; left:0; min-width:210px; z-index:50;
+  background:var(--bg3); border:1px solid var(--line); box-shadow:0 8px 22px #0008; padding:4px 0;
+}
+.menu.open .dropdown{display:block}
+.mi{padding:5px 16px; cursor:pointer; color:var(--fg); white-space:nowrap}
+.mi:hover{background:var(--accent); color:#fff}
+.sep{height:1px; background:var(--line); margin:4px 0}
+/* 顶菜单（menubar.js 照 PS／AI 生成）：.mb 顶项、.mbdd 下拉（fixed、可多层）、.mbi 项 */
+.mb{position:relative; display:flex; align-items:center; padding:0 10px; cursor:default; font-size:13px}
+.mb:hover,.mb.open{background:var(--bg3)}
+.mb.open{background:var(--accent); color:#fff}
+.mbdd{
+  position:fixed; z-index:140; min-width:230px; background:var(--bg3); border:1px solid var(--line);
+  box-shadow:0 8px 22px #000a; padding:4px 0; font-size:12.5px; color:var(--fg); user-select:none;
+}
+.mbi{display:flex; align-items:center; gap:6px; padding:4px 22px 4px 8px; cursor:default; white-space:nowrap}
+.mbi:hover,.mbi.open{background:var(--accent); color:#fff}
+.mbi.off{color:#7a7a7a} .mbi.off:hover{background:#3a3a3a; color:#8a8a8a}
+.mbi.hdr{color:#8a8a8a; font-size:11px; padding-top:6px} .mbi.hdr:hover{background:none}
+.mbi .mk{width:12px; font-size:10px; text-align:center}
+.mbi .nm{flex:1}
+.mbi .kb{opacity:.65; font-size:11px; margin-left:24px}
+.mbi .arr{opacity:.7; font-size:11px; margin-left:16px}
+.mbi .todo{font-size:9px; border:1px solid currentColor; border-radius:3px; padding:0 3px; opacity:.6; margin-left:6px}
+.mbi .only{font-size:9.5px; border:1px solid currentColor; border-radius:3px; padding:0 4px; margin-left:10px; opacity:.85; white-space:nowrap}
+.mbi[data-only=raster] .only{color:#8fb8e8} .mbi[data-only=vector] .only{color:#7fd39a}
+.mbi.kindoff .only{color:inherit; opacity:.7} .mbi:hover .only{color:inherit}
+.mbsep{height:1px; background:var(--line); margin:4px 8px}
+#langSel{
+  align-self:center; margin-right:8px; background:var(--bg3); color:var(--fg);
+  border:1px solid var(--line); border-radius:3px; padding:2px 4px; font-size:12px;
+}
+#agentHint{display:flex;align-items:center;padding:0 10px;color:#5fb37a;font-size:12px}
+
+/* ───── 选项栏 ───── */
+#optionbar{
+  height:30px; flex:0 0 auto; display:flex; align-items:center; gap:14px;
+  background:var(--bg2); border-bottom:1px solid var(--line); padding:0 10px; font-size:12px;
+}
+#optToolName{font-weight:600; color:#fff; min-width:92px}
+#optBody{display:flex; align-items:center; gap:14px; flex-wrap:nowrap; overflow:hidden}
+#optBody label{display:flex; align-items:center; gap:5px; color:var(--fg2)}
+#optBody input[type=range]{width:110px}
+#optBody input[type=number]{width:56px; background:var(--bg3); color:var(--fg); border:1px solid var(--line); border-radius:3px; padding:2px 4px}
+#optBody input[type=text]{width:150px; background:var(--bg3); color:var(--fg); border:1px solid var(--line); border-radius:3px; padding:2px 6px}
+#optBody select{background:var(--bg3); color:var(--fg); border:1px solid var(--line); border-radius:3px; padding:2px 4px}
+
+/* ───── 主区 ───── */
+#main{flex:1; display:flex; min-height:0}
+
+/* 左工具栏（照 PS／AI：一格一钮、双栏、右下角小箭头＝有弹出选单；toolbar.js 画） */
+#toolbar{
+  flex:0 0 auto; background:var(--bg2); border-right:1px solid var(--line);
+  display:flex; flex-direction:column; align-items:center; padding:3px 0 6px; gap:2px; overflow-y:auto; overflow-x:hidden;
+}
+#toolbar.cols2{width:78px} #toolbar.cols1{width:46px}
+.tbhead{display:flex; align-items:center; gap:3px; width:100%; padding:0 4px 2px}
+.tbcols{font-size:11px; color:var(--fg2); cursor:pointer; padding:0 2px; line-height:1} .tbcols:hover{color:#fff}
+.tbgrid{display:grid; grid-template-columns:repeat(2, 34px); gap:1px 2px; justify-content:center}
+#toolbar.cols1 .tbgrid{grid-template-columns:34px}
+.tbgap{grid-column:1 / -1; height:5px}
+.tb{
+  width:34px; height:32px; display:flex; align-items:center; justify-content:center;
+  border-radius:3px; cursor:pointer; color:var(--fg2); position:relative;
+}
+.tb:hover{background:var(--bg3); color:#fff}
+.tb.on, .tb.open{background:var(--accent); color:#fff}
+.tb.todo{opacity:.42}
+.tb .fly{position:absolute; right:2px; bottom:2px; width:0; height:0; border-left:4px solid transparent; border-bottom:4px solid currentColor; opacity:.75}
+.tb .kbd{position:absolute; right:2px; bottom:1px; font-size:8px; opacity:.55}
+.tbsep{width:26px;height:1px;background:var(--line);margin:4px 0}
+.tbwidgets{display:flex; flex-direction:column; align-items:center; gap:3px; margin-top:6px}
+/* 前景／背景色（PS：两个方块叠着；AI：填色方块＋描边框） */
+.tbcolors{position:relative; width:46px; height:44px; margin:2px 0 4px}
+.tbcolors .fg,.tbcolors .bg{position:absolute; width:24px; height:24px; border:1px solid #111; box-shadow:0 0 0 1px #777; cursor:pointer}
+.tbcolors .fg{left:3px; top:3px; z-index:2}
+.tbcolors .bg{right:3px; bottom:3px; z-index:1}
+.tbcolors.ai .bg{background:transparent !important; border:6px solid var(--sc, #fff); box-shadow:0 0 0 1px #777, inset 0 0 0 1px #777}
+.tbcolors .fg.act,.tbcolors .bg.act{z-index:3}
+.tbcolors .fg.none,.tbcolors .bg.none{background:#fff !important; border-color:#e23b3b}
+.tbcolors .fg.none::after,.tbcolors .bg.none::after{content:''; position:absolute; left:-2px; right:-2px; top:50%; border-top:2px solid #e23b3b; transform:rotate(-45deg)}
+.tbcolors .swap{position:absolute; right:0; top:0; color:var(--fg2); cursor:pointer; line-height:0}
+.tbcolors .dflt{position:absolute; left:0; bottom:0; color:var(--fg2); cursor:pointer; line-height:0}
+.tbcolors .swap:hover,.tbcolors .dflt:hover{color:#fff}
+.tbpaint{display:flex; gap:2px; margin-bottom:2px}
+.tbpaint .pm{width:20px; height:18px; display:flex; align-items:center; justify-content:center; border-radius:2px; color:var(--fg2); cursor:pointer}
+.tbpaint .pm:hover{background:var(--bg3); color:#fff}
+.tbpaint .pm.todo{opacity:.42}
+/* 懸停小牌：白底灰黑字「某某工具 (V)」 */
+.tbtip{
+  position:fixed; z-index:130; pointer-events:none; white-space:nowrap;
+  background:#fafafa; color:#2a2a2a; border:1px solid #c4c4c4; border-radius:3px; box-shadow:0 3px 10px #0006;
+  padding:4px 9px; font-size:12px; line-height:1.3; display:flex; align-items:center; gap:6px;
+}
+.tbtip b{font-weight:600; color:#1a1a1a}
+.tbtip .k{color:#666}
+.tbtip .todo{font-size:10px; color:#8a5a00; border:1px solid #c89a3a; border-radius:3px; padding:0 3px}
+/* 小箭头弹出选单 */
+.tbfly{
+  position:fixed; z-index:120; background:var(--bg3); border:1px solid var(--line); box-shadow:0 8px 22px #0009;
+  padding:3px 0; min-width:190px; font-size:12.5px; color:var(--fg); user-select:none;
+}
+.tbfly.mn{background:#f2f2f2; color:#222; border-color:#bbb}
+.tbfi{display:flex; align-items:center; gap:7px; padding:4px 10px 4px 6px; cursor:pointer; white-space:nowrap}
+.tbfi:hover{background:var(--accent); color:#fff}
+.tbfly.mn .tbfi:hover{background:#dfe8f3; color:#111}
+.tbfi .mark{width:10px; font-size:9px; text-align:center}
+.tbfi .nm{flex:1}
+.tbfi .kb{opacity:.7; font-size:11px; margin-left:12px}
+.tbfi.todo{opacity:.5}
+.tbfi .todo,.tbdi .todo{font-size:10px; border:1px solid currentColor; border-radius:3px; padding:0 3px; opacity:.8}
+.tbfly .sep{height:1px; background:#ccc; margin:3px 0}
+/* 所有工具抽屉 */
+#tbdrawer{
+  position:fixed; z-index:119; width:300px; background:var(--bg3); border:1px solid var(--line); box-shadow:0 8px 22px #0009;
+  display:flex; flex-direction:column; font-size:12.5px; color:var(--fg)
+}
+#tbdrawer .dh{display:flex; justify-content:space-between; padding:6px 10px; font-weight:600; border-bottom:1px solid var(--line)}
+#tbdrawer .dh .x{cursor:pointer; padding:0 4px} #tbdrawer .dh .x:hover{color:#fff}
+#tbdrawer .db{overflow-y:auto; padding:4px 8px 8px}
+#tbdrawer .ds{margin:8px 0 3px; color:#fff; font-weight:600}
+#tbdrawer .dg{border:1px solid var(--line); border-radius:3px; margin:3px 0}
+.tbdi{display:flex; align-items:center; gap:8px; padding:4px 8px; cursor:pointer; border-bottom:1px solid var(--line)}
+.tbdi:last-child{border-bottom:0}
+.tbdi:hover{background:var(--accent); color:#fff}
+.tbdi.on{background:#3a4b63}
+.tbdi.todo{opacity:.55}
+.tbdi .nm{flex:1} .tbdi .kb{opacity:.7; font-size:11px}
+/* 屏幕模式：全屏藏面板；演示模式连工具栏都藏 */
+body.tb-full #menubar, body.tb-full #rightpanel{display:none}
+body.tb-present #toolbar, body.tb-present #optionbar, body.tb-present #statusbar{display:none}
+
+/* 画布区 */
+#stage{flex:1; display:flex; flex-direction:column; min-width:0; background:#171717}
+#canvasWrap{
+  flex:1; overflow:hidden; display:flex; align-items:center; justify-content:center; position:relative;
+}
+#view{
+  box-shadow:0 0 0 1px #000, 0 6px 30px #0009;
+  image-rendering:auto; cursor:crosshair;
+  touch-action:none;   /* 触控／笔在画布上一律交给工具画，不让浏览器拿去捲动缩放（否则按下后马上 pointercancel、收不了笔） */
+  background:
+    linear-gradient(45deg,#2a2a2a 25%,transparent 25%,transparent 75%,#2a2a2a 75%),
+    linear-gradient(45deg,#2a2a2a 25%,#232323 25%,#232323 75%,#2a2a2a 75%);
+  background-size:16px 16px; background-position:0 0,8px 8px;
+}
+#statusbar{
+  height:24px; flex:0 0 auto; display:flex; align-items:center; gap:16px; padding:0 10px;
+  background:var(--bg2); border-top:1px solid var(--line); color:var(--fg2); font-size:11px;
+}
+#statusbar .spacer{flex:1}
+
+/* 右面板 */
+#rightpanel{
+  width:252px; flex:0 0 252px; background:var(--bg2); border-left:1px solid var(--line);
+  display:flex; flex-direction:column; padding:8px; gap:6px; overflow:hidden;
+}
+.ph{font-weight:600; color:#fff; font-size:12px; letter-spacing:.3px}
+/* 右面板分页：图层｜历史记录 */
+.rptabs{display:flex; gap:2px; border-bottom:1px solid var(--line)}
+.rptab{background:transparent; color:var(--fg2); border:1px solid transparent; border-bottom:none; border-radius:3px 3px 0 0; padding:4px 10px; font-size:12px; font-weight:600; cursor:pointer; margin-bottom:-1px}
+.rptab:hover{color:#fff}
+.rptab.on{background:var(--bg3); color:#fff; border-color:var(--line)}
+#rpLayers{display:flex; flex-direction:column; gap:6px; flex:1; min-height:0}
+#rpHistory{flex:1; min-height:0; overflow:auto; padding:0}
+#rpHistory .hlist{max-height:none}
+.layerops{display:flex; flex-direction:column; gap:5px; font-size:11px; color:var(--fg2)}
+.layerops select{background:var(--bg3); color:var(--fg); border:1px solid var(--line); border-radius:3px; padding:3px}
+.layerops label{display:flex; align-items:center; gap:6px}
+.layerops input[type=range]{flex:1}
+#layerList{flex:1; overflow-y:auto; border:1px solid var(--line); background:var(--bg); border-radius:3px; min-height:80px}
+.lrow{display:flex; align-items:center; gap:6px; padding:5px 6px; cursor:pointer; border-bottom:1px solid #2a2a2a}
+.lrow:hover{background:var(--bg3)}
+.lrow.on{background:var(--accent); color:#fff}
+.lrow .eye{width:16px; text-align:center; opacity:.85}
+.lrow .thumb{width:30px;height:24px;background:#111;border:1px solid #000;flex:0 0 30px;object-fit:contain}
+.lrow .nm{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px}
+.lrow .kind{font-size:9px; padding:1px 4px; border-radius:2px; background:#444; color:#ddd}
+/* 锁定：一排四颗（PS 图层面板）＋图层列右边的小锁 */
+.lockrow{display:flex; align-items:center; gap:2px; font-size:11px; color:var(--fg2); margin:5px 0 4px}
+.lockrow > span{margin-right:4px}
+.lockbtn{width:22px; height:20px; padding:0; display:inline-flex; align-items:center; justify-content:center; background:transparent; color:var(--fg2); border:1px solid transparent; border-radius:3px; cursor:pointer}
+.lockbtn .ico{width:15px; height:15px}
+.lockbtn:hover{background:var(--bg3); color:var(--fg)}
+.lockbtn.on{background:var(--bg3); border-color:var(--line); color:#fff; box-shadow:inset 0 1px 2px rgba(0,0,0,.5)}
+.lockbtn:disabled{opacity:.35; cursor:default}
+.lrow .lk{display:inline-flex; width:14px; height:14px; flex:0 0 14px; opacity:.8}
+.lrow .lk .ico{width:13px; height:13px}
+.lrow.on .kind{background:#1a4f88}
+.kind.vector{background:#4a6b2f}
+.kind.text{background:#6b4a2f}
+.layerbtns{display:flex; gap:4px}
+.layerbtns button{
+  flex:1; background:var(--bg3); color:var(--fg); border:1px solid var(--line);
+  border-radius:3px; padding:4px 0; cursor:pointer; font-size:13px;
+}
+.layerbtns button:hover{background:var(--accent); color:#fff}
+.colorrow{display:flex; flex-direction:column; gap:5px; font-size:11px; color:var(--fg2)}
+.colorrow label{display:flex; align-items:center; gap:6px}
+.colorrow input[type=color]{width:38px;height:22px;padding:0;border:1px solid var(--line);background:none;cursor:pointer}
+.colorrow input[type=number]{width:60px;background:var(--bg3);color:var(--fg);border:1px solid var(--line);border-radius:3px;padding:2px 4px}
+
+/* 工具栏顶上的「现在在编辑哪种层」标签 */
+.tbkind{
+  width:38px; margin:1px 0 5px; padding:2px 0; text-align:center;
+  font-size:10px; border-radius:3px; background:#444; color:#ddd; letter-spacing:.5px;
+}
+.tbkind.vector{background:#4a6b2f; color:#eaf5e0}
+.tbkind.raster{background:#3a4b63; color:#dce8f5}
+.tbkind.text{background:#6b4a2f; color:#f5e8dc}
+
+/* AI 正在画时（humanlock.js）：画布上编辑游标改成「不行」，抓手／缩放照旧 */
+body.dl-humanlock #canvasWrap { cursor: not-allowed; }
+body.dl-humanlock #rightpanel, body.dl-humanlock #optionbar { opacity: .75; }
+
+/* 画布捲軸（tools/scrollbars.js）：右边直的、下面横的，叠在画布区边上 */
+.dl-sb{position:absolute; z-index:5; background:#1e1e1e; touch-action:none}
+.dl-sb-y{top:0; right:0; bottom:12px; width:12px; border-left:1px solid #000}
+.dl-sb-x{left:0; right:12px; bottom:0; height:12px; border-top:1px solid #000}
+.dl-sb-thumb{position:absolute; background:#5a5a5a; border-radius:6px; cursor:default}
+.dl-sb-y .dl-sb-thumb{left:2px; right:2px}
+.dl-sb-x .dl-sb-thumb{top:2px; bottom:2px}
+.dl-sb-thumb:hover, .dl-sb-thumb.on{background:#808080}
+
+/* 放大模式（ui.js draw：倍率 > 1:1）：1:1 文件像素靠 CSS 放大、一格一格显示；叠画另画在盖满画布区的叠画层 */
+#view.dl-pixel{image-rendering:pixelated}
+.dl-overlay{position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; z-index:4}
+
+/* AI 介面操作模式（tools/aiui.js）：AI 游标、点击涟漪、按键提示 */
+.dl-ai-cursor{position:fixed; left:0; top:0; z-index:100000; pointer-events:none; opacity:0; transition:opacity .25s; will-change:transform}
+.dl-ai-cursor.on{opacity:1}
+.dl-ai-cursor span{position:absolute; left:16px; top:20px; background:#8b5cf6; color:#fff; font:bold 10px/14px sans-serif; padding:0 4px; border-radius:7px; box-shadow:0 1px 3px #0008}
+.dl-ai-ripple{position:fixed; z-index:99999; pointer-events:none; width:26px; height:26px; margin:-13px 0 0 -13px; border:2px solid #8b5cf6; border-radius:50%; animation:dlAiRip .45s ease-out forwards}
+@keyframes dlAiRip{from{transform:scale(.3); opacity:1} to{transform:scale(1.6); opacity:0}}
+.dl-ai-key{position:fixed; z-index:100000; pointer-events:none; background:#8b5cf6; color:#fff; font:bold 12px/20px sans-serif; padding:0 8px; border-radius:4px; box-shadow:0 2px 6px #0008}
+
+/* 1025 右面板版面（menus/impl/rp-layout.js）：左缘拖拉条调宽、分页列小箭头收合、选项栏提示字省略号 */
+#rpGrip{flex:0 0 6px; width:6px; margin:0 -3px; position:relative; z-index:6; cursor:col-resize; touch-action:none; background:transparent; transition:background .12s}
+#rpGrip:hover{background:rgba(14,165,233,.4)}
+#rpGrip.on{background:rgba(14,165,233,.6)}
+body.rp-resizing, body.rp-resizing *{cursor:col-resize !important; user-select:none !important}
+body.tb-full #rpGrip, body.tb-present #rpGrip{display:none}
+.rpfold{margin-left:auto; align-self:center; background:transparent; border:0; color:var(--fg2); font-size:12px; line-height:1; padding:2px 6px; cursor:pointer; border-radius:3px}
+.rpfold:hover{color:#fff; background:var(--bg3)}
+#rightpanel.rp-collapsed > .rppane{display:none !important}
+#optBody{flex:1 1 auto; min-width:0}
+#optBody > span[style*="122, 130, 144"], #optBody > span[style*="7a8290"]{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1 1 auto}
