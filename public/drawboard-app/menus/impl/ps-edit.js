@@ -671,24 +671,22 @@ CMD.reg('ps.pattern.list', {i18n:'', params:'{} 图案库清单（内建 7 个�
   () => Patterns.load().map(q => ({id:q.id, name:q.name, width:q.width, height:q.height})));
 
 /* ═══════════ 定义画笔预设（edit_menu_cmds.rs:495 → brush_cmds.rs:512 define_from_selection） ═══════════ */
-const BRUSH_KEY = 'dlcanvas.ps.brushPresets';
+/* 取样笔尖的库在 tools/brush.js 的 BrushTips（同一个 localStorage 键 dlcanvas.ps.brushPresets；笔刷引擎画得出来）：这里只做「从选区／图层取灰阶」 */
 const BrushPresets = PE.brushPresets = {
-  list(){ try { return JSON.parse(localStorage.getItem(BRUSH_KEY) || '[]') || []; } catch(e){ return []; } },
-  save(l){ try { localStorage.setItem(BRUSH_KEY, JSON.stringify(l)); return true; } catch(e){ return false; } },
-  put(o){ const l = this.list(), i = l.findIndex(b => b.name === o.name); if (i >= 0) l[i] = o; else l.push(o); return this.save(l); },
+  list(){ return window.BrushTips ? BrushTips.list().filter(t => t.source !== 'builtin') : []; },
 };
 function defineBrushPreset(p){
   const pl = pixelLayer(p); if (pl.error) return fail(pl.error);
-  if (!Doc.sel) return fail('select pixels to define a brush from');
   let name = typeof p.name === 'string' ? p.name.trim() : '';
   if (!name){ const n = BrushPresets.list().filter(b => b.name.startsWith('Sampled Brush')).length + 1; name = `Sampled Brush ${n}`; }
-  const area = Rc.inter(selRect(), docRect());
-  if (!area) return fail('brush.defineFromSelection: the selection is empty');
+  // 区域：选区外框；没选区＝这一层画布（PS：没选区时取整层内容）
+  const area = Rc.inter(Doc.sel ? selRect() : canvasRect(pl.L), docRect());
+  if (!area) return fail(Doc.sel ? 'brush.defineFromSelection: the selection is empty' : 'brush.defineFromLayer: the layer is outside the canvas');
   // 涂料量＝暗度×alpha×选区（黑＝满、白／透明＝没有，同 Photoshop）
   const w = Rc.w(area), h = Rc.h(area), px = readLayer(pl.L, area), cov = selBytes(), DW = Doc.width, v = new Float32Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++){
     const i = (y * w + x) * 4, l = lum([px[i] / 255, px[i + 1] / 255, px[i + 2] / 255]);
-    v[y * w + x] = c01((1 - l) * (px[i + 3] / 255) * (cov[(area[1] + y) * DW + area[0] + x] / 255));
+    v[y * w + x] = c01((1 - l) * (px[i + 3] / 255) * (cov ? cov[(area[1] + y) * DW + area[0] + x] / 255 : 1));
   }
   let x0 = w, y0 = h, x1 = 0, y1 = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (v[y * w + x] > 1e-4){ x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + 1); y1 = Math.max(y1, y + 1); }
@@ -697,15 +695,16 @@ function defineBrushPreset(p){
   if (Math.max(tw, th) > 2500) return fail(`brush.defineFromSelection: selection too large for a brush tip (${tw}×${th}; max 2500 px)`);
   const tip = new Uint8Array(tw * th);
   for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) tip[(y - y0) * tw + (x - x0)] = Math.round(v[y * w + x] * 255);
-  const preset = {name, width:tw, height:th, size:Math.max(tw, th), spacing:0.25, tip:b64(tip)};
-  const saved = BrushPresets.put(preset);
-  // 我们的笔刷（tools/brush.js）还只有圆笔尖、不收取样笔尖：先存进预设库，笔刷那边接上就能用
-  return {ok:true, name, width:tw, height:th, size:preset.size, saved, applied:false};
+  if (!CMD.map['brush.tips.add']) return fail('the brush engine (tools/brush.js) is not loaded');
+  // 存进本机预设库＋这份档，并换成这支笔尖（PS：定义完就是目前的画笔）
+  const r = CMD.map['brush.tips.add'].run({name, width:tw, height:th, alpha:tip, size:Math.max(tw, th), spacing:0.25, select:p.select !== false});
+  if (!r || r.ok === false) return r || fail('brush.tips.add failed');
+  return Object.assign({ok:true, name, id:r.tip.id, width:r.tip.width, height:r.tip.height, size:r.tip.size, saved:r.saved, applied:r.selected}, r.warning ? {warning:r.warning} : {}, r.note ? {note:r.note} : {});
 }
-CMD.reg('ps.edit.defineBrushPreset', {i18n:'', params:'{name?（缺省 "Sampled Brush N"）, dialog?:true＝开「画笔名称」对话框} 定义画笔预设：当前像素层选区内的暗度×不透明度做成灰阶笔尖，存进浏览器的画笔预设库 → {name,width,height,size,saved}'},
+CMD.reg('ps.edit.defineBrushPreset', {i18n:'', params:'{name?（缺省 "Sampled Brush N"）, layerId?, select?:bool=true（定义完换成这支）, dialog?:true＝开「画笔名称」对话框} 定义画笔预设：当前像素层选区内（没选区＝整层）的暗度×不透明度做成灰阶笔尖，存进本机画笔预设库与这份工程档，笔刷换成它 → {name,id,width,height,size,saved,applied}'},
   p => p.dialog ? openDefineDialog('brush') : defineBrushPreset(p));
-CMD.reg('ps.brush.presets', {i18n:'', params:'{} 用「定义画笔预设」存下来的取样笔尖清单 → [{name,width,height,size,spacing}]'},
-  () => BrushPresets.list().map(b => ({name:b.name, width:b.width, height:b.height, size:b.size, spacing:b.spacing})));
+CMD.reg('ps.brush.presets', {i18n:'', params:'{} 自己的取样笔尖清单（定义画笔预设、读入 .abr 的；内建的见 brush.tips.list）→ [{id,name,width,height,size,spacing}]'},
+  () => BrushPresets.list().map(b => ({id:b.id, name:b.name, width:b.width, height:b.height, size:b.size, spacing:b.spacing})));
 
 /* ═══════════ 选区距离变换（algo/src/selection.rs 540-622） ═══════════ */
 function dt1(f, n, out, v, z){                // Felzenszwalb & Huttenlocher 一维平方距离变换
@@ -2277,10 +2276,7 @@ function openFadeDialog(){
 CMD.reg('ps.edit.fade.dialog', {i18n:'', params:'{} 开「渐隐」对话框（Ctrl+Shift+F）；确定＝跑 ps.edit.fade'}, () => openFadeDialog());
 /* 定义图案… ／ 定义画笔预设…：只问名字 */
 function openDefineDialog(kind){
-  if (kind === 'brush'){
-    const pl = pixelLayer({}); if (pl.error) return fail(pl.error);
-    if (!Doc.sel) return fail('select pixels to define a brush from');
-  }
+  if (kind === 'brush'){ const pl = pixelLayer({}); if (pl.error) return fail(pl.error); }   // 没选区＝取整层（defineBrushPreset）
   const items = Patterns.load();
   let dflt;
   if (kind === 'pattern'){ for (let i = 1; ; i++){ const n = i === 1 ? 'Pattern' : `Pattern ${i}`; if (!items.some(q => q.name === n)){ dflt = n; break; } } }
@@ -5716,6 +5712,59 @@ CMD.reg('ps.edit.transform.warp', {i18n:'', params:'{} ＝进互动变形模式�
   p => hasParams(p) ? CMD.run('ps.edit.transform.warp.apply', p) : begin());
 CMD.reg('ps.edit.transform.warp.apply', {i18n:'', undoable:true, params:P + ' 变形引擎（warp_cmds.rs edit.transform.warp）：像素层重采样；有选区只变选中的像素、选区轮廓跟着变；文字／矢量层要先栅格化（报错）；恒等变形不留历史 → {ok, layerId, changed, rect}'},
   p => apply(p, 'edit.transform.warp'));
+/* 变换选区 ▸ 变形（PS：选择 ▸ 变换选区 之后 编辑 ▸ 变换 ▸ 变形／右键「变形」）：只变选区遮罩、不动像素；同一套变形网格与映射（warpMapper），遮罩双线性重采样（warpSelection） */
+function selWarp(p, C){
+  if (!Doc.sel || !window.SelMask) return {error:`${C}: no selection`};
+  let rect, w;
+  try {
+    rect = (Array.isArray(p.rect) && p.rect.length === 4) ? p.rect.map(v => Math.round(Number(v) || 0)) : selRect();
+    if (!rect || !(rect[2] > rect[0] && rect[3] > rect[1])) throw new Error(`${C}: nothing to warp`);
+    w = warpFromParams(C, p, rect);
+  } catch (e){ return {error:e.message}; }
+  return {rect, w};
+}
+PE.selWarp = (p, C) => { const r = selWarp(p, C || 'select.transformSelection.warp'); if (r.error) return r; if (warpIsIdentity(r.w)) return {changed:false, rect:r.rect}; warpSelection(warpMapper(r.w)); return {changed:true, rect:r.rect}; };
+CMD.reg('ps.select.transformSelection.warp', {i18n:'', undoable:true, params:P.replace('{layerId?, rect?:[x0,y0,x1,y1]（变形的框；缺省＝该层内容外框 ∩ 选区外框）', '{rect?:[x0,y0,x1,y1]（变形的框；缺省＝选区外框）')
+  + ' 变换选区 ▸ 变形：照变形样式／网格只变形选区的轮廓（遮罩双线性重采样），像素不动；跑出画布的部分切掉；恒等变形不留历史 → {ok, changed, rect, bounds:[x,y,w,h]|null}'}, p => {
+  const C = 'select.transformSelection.warp', r = PE.selWarp(p, C);
+  if (r.error) return fail(r.error);
+  if (!r.changed){ History.past.pop(); return {ok:true, changed:false}; }      // 同 warp.apply：恒等不留一步空的 Ctrl+Z
+  return {ok:true, changed:true, rect:r.rect, bounds:Doc.sel ? [Doc.sel.x, Doc.sel.y, Doc.sel.w, Doc.sel.h] : null};
+});
+CMD.reg('ps.select.transformSelection.warp.dialog', {i18n:'', undoable:false,
+  params:'{} 打开「变换选区：变形」对话框（样式、弯曲 %、水平／垂直扭曲 %、垂直方向），改的同时画布上预览选区；确定＝跑 ps.select.transformSelection.warp（一步历史），取消＝选区回原样。没有选区＝不开'}, () => {
+  if (!Doc.sel) return fail('no selection');
+  const orig = Doc.sel, R = {style:'arc', bend:50, hDistort:0, vDistort:0, vertical:false};
+  const preview = () => { Doc.sel = orig; const r = PE.selWarp(R); if (window.UI) UI.draw(); return r; };
+  const L3w = (a, b, c) => ({'zh-Hant':a, 'zh-Hans':b, en:c}), tr = o => o[(window.Lang && Lang.cur) || 'zh-Hans'] || o.en;
+  const back = document.createElement('div'); back.className = 'pswarpsel-back';
+  back.style.cssText = 'position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.25)';
+  const box = document.createElement('div'); box.id = 'warpSelDlg';
+  box.style.cssText = 'background:#2a2d33;color:#e8eaed;border:1px solid #4a4f57;border-radius:6px;padding:14px 16px;font:13px sans-serif;min-width:300px;box-shadow:0 8px 24px rgba(0,0,0,.45)';
+  box.innerHTML = `<div style="font-weight:bold;margin-bottom:10px">${tr(L3w('變形選取範圍：彎曲', '变换选区：变形', 'Transform Selection: Warp'))}</div>`;
+  const rowOf = (label, input) => { const r = document.createElement('label'); r.style.cssText = 'display:flex;justify-content:space-between;gap:10px;margin:6px 0;align-items:center'; const s = document.createElement('span'); s.textContent = tr(label); r.appendChild(s); r.appendChild(input); box.appendChild(r); return input; };
+  const sel = document.createElement('select'); sel.dataset.k = 'style';
+  STYLES.filter(s => s !== 'none' && s !== 'custom').forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = T('pse3.warp.style.' + s); sel.appendChild(o); });
+  sel.value = R.style; rowOf(L3w('樣式：', '样式：', 'Style:'), sel);
+  const num = (k, label) => { const n = document.createElement('input'); n.type = 'number'; n.min = -100; n.max = 100; n.step = 1; n.value = R[k]; n.style.width = '70px'; n.dataset.k = k; rowOf(label, n); return n; };
+  const nb = num('bend', L3w('彎曲 (%)：', '弯曲 (%)：', 'Bend (%):')), nh = num('hDistort', L3w('水平扭曲 (%)：', '水平扭曲 (%)：', 'Horizontal Distortion (%):')), nv = num('vDistort', L3w('垂直扭曲 (%)：', '垂直扭曲 (%)：', 'Vertical Distortion (%):'));
+  const vt = document.createElement('input'); vt.type = 'checkbox'; vt.dataset.k = 'vertical'; rowOf(L3w('垂直', '垂直', 'Vertical'), vt);
+  const err = document.createElement('div'); err.style.cssText = 'color:#ff8080;min-height:16px;font-size:12px'; box.appendChild(err);
+  const read = () => { R.style = sel.value; R.bend = +nb.value || 0; R.hDistort = +nh.value || 0; R.vDistort = +nv.value || 0; R.vertical = vt.checked; const r = preview(); err.textContent = r.error || ''; };
+  [sel, nb, nh, nv, vt].forEach(x => { x.oninput = read; x.onchange = read; });
+  const bar = document.createElement('div'); bar.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:10px';
+  const close = () => { back.remove(); document.removeEventListener('keydown', onKey, true); };
+  const cancel = () => { Doc.sel = orig; close(); if (window.UI) UI.draw(); };
+  const ok = () => { Doc.sel = orig; close(); const r = CMD.run('ps.select.transformSelection.warp', Object.assign({}, R)); if (r && r.ok === false) console.warn('[warp selection]', r.error); };   // 先收回预览，历史快照才是原选区
+  const b1 = document.createElement('button'); b1.textContent = tr(L3w('取消', '取消', 'Cancel')); b1.dataset.act = 'cancel'; b1.onclick = cancel;
+  const b2 = document.createElement('button'); b2.textContent = tr(L3w('確定', '确定', 'OK')); b2.dataset.act = 'ok'; b2.onclick = ok;
+  bar.appendChild(b1); bar.appendChild(b2); box.appendChild(bar);
+  const onKey = e => { if (e.key === 'Escape'){ e.preventDefault(); e.stopPropagation(); cancel(); } else if (e.key === 'Enter'){ e.preventDefault(); e.stopPropagation(); ok(); } };
+  document.addEventListener('keydown', onKey, true);
+  back.appendChild(box); document.body.appendChild(back);
+  read();
+  return {ok:true, dialog:'ps.select.transformSelection.warp'};
+});
 const S = '{warp:{…}（正在编辑的变形；回拆好的）| style／mesh（同 ps.edit.transform.warp）, rect?:[x0,y0,x1,y1]=[0,0,1,1], at?:[x,y]（文件坐标；缺省＝所在那块的中间）} → {ok, warp}（不进历史）；'
   + '变形模式开着、没给 warp ⇒ 拆目前的网格（画面即时更新）；不在变形模式又没给 warp ⇒ 改当前智能对象存的变形（{layerId?}；没变形＝在内容外框上新建、尾端是扭曲透视＝先化成网格；一步历史 → {layer, warp}），不是智能对象＝报错（warp_cmds.rs:275-311）';
 for (const [id, how, zh] of [['splitWarpCrosswise', 'crosswise', '交叉拆分变形'], ['splitWarpHorizontally', 'horizontal', '水平拆分变形'], ['splitWarpVertically', 'vertical', '垂直拆分变形'], ['removeWarpSplit', 'remove', '移去变形拆分']]){

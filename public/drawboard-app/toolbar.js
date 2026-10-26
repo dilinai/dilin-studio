@@ -155,7 +155,11 @@ const Toolbar = {
     if (item.impl.startsWith('cmd:')){ if (!CMD.map[item.impl.slice(4)]) return false; CMD.run(item.impl.slice(4)); if (window.UI) UI.draw(); this.sync(ToolState.cur); return true; }   // 钮＝跑一条命令（快速蒙版 ⇒ ps.select.editInQuickMaskMode）
     if (item.impl.startsWith('screen:')){ this.screenMode(item.impl.slice(7)); return true; }
     if (item.impl.startsWith('paint:')){ this.paint(item.impl.slice(6)); return true; }
-    if (item.impl.startsWith('draw:')){ this.sync(ToolState.cur); return true; }
+    if (item.impl.startsWith('draw:')){                  // AI 绘图模式（正常／背面／内部）＝ai.drawMode.set；Shift+D 轮换＝ai.drawMode.cycle（内部绘图要先选一个物件，没选就跳过）
+      if (CMD.map['ai.drawMode.set']){ const r = o.cycle ? CMD.run('ai.drawMode.cycle', {}) : CMD.run('ai.drawMode.set', {mode:item.impl.slice(5)}); if (r && r.ok === false) console.warn('[toolbar] draw mode:', r.error); }
+      const k = f.g.items.findIndex(x => x.impl === 'draw:' + (window.DrawMode ? DrawMode.mode : 'normal')); if (k >= 0) this.surface(f.g, k);
+      this.sync(ToolState.cur); return true;
+    }
     if (!Tools.get(item.impl)){ this.sync(ToolState.cur); return false; }
     UI.setTool(item.impl);
     if (o.user && item.set && CMD.map[item.set.cmd]) CMD.run(item.set.cmd, item.set.params);
@@ -215,7 +219,7 @@ const Toolbar = {
   },
   menuOn(g, item){
     if (g.key === 'screen') return item.impl === 'screen:' + this.screen;
-    if (g.key === 'drawmode') return item.impl === 'draw:normal';
+    if (g.key === 'drawmode') return item.impl === 'draw:' + (window.DrawMode ? DrawMode.mode : 'normal');
     return false;
   },
 
@@ -282,6 +286,7 @@ const Toolbar = {
         const it = cands[i], f = this.groupOf(it.id);
         if (it.impl && Tools.get(it.impl) && it.impl === ToolState.cur && this.surfaced(f.g) === it) idx = i;
         else if (it.impl && it.impl.startsWith('screen:') && it.impl === 'screen:' + this.screen) idx = i;
+        else if (it.impl && it.impl.startsWith('draw:')){ this.choose(it.id, {user:true, cycle:true}); return true; }   // Shift+D：绘图模式轮换（跳过用不了的）
       }
       // PS：手上的工具不在这组 ⇒ 先选回那格表面的工具（上回从飞出选的那颗），不是固定跳组里第一颗；已在这组才轮换
       const top = idx < 0 ? cands.findIndex(it => { const f = this.groupOf(it.id); return f && this.surfaced(f.g) === it; }) : -1;

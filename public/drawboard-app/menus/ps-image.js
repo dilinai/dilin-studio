@@ -57,6 +57,7 @@ MenuTrees.add('ps', 'image', {
     // 影像尺寸＝重新取样整份文件；版面尺寸＝改画布大小但保留内容。file.new 会清空文件，不算同一件事
     {n:{'zh-Hant':'影像尺寸…', 'zh-Hans':'图像大小…', en:'Image Size…'}, id:'image.imageSize', key:'Ctrl+Alt+I', impl:{cmd:'ps.image.imageSize', params:{dialog:true}}},
     {n:{'zh-Hant':'版面尺寸…', 'zh-Hans':'画布大小…', en:'Canvas Size…'}, id:'image.canvasSize', key:'Ctrl+Alt+C', impl:{cmd:'ps.image.canvasSize', params:{dialog:true}}},
+    {n:{'zh-Hant':'生成式擴展…', 'zh-Hans':'生成式扩展…', en:'Generative Expand…'}, id:'image.generativeExpand', impl:'genai.expand.dialog'},
     {n:{'zh-Hant':'影像旋轉', 'zh-Hans':'图像旋转', en:'Image Rotation'}, sub:[
       {n:{'zh-Hant':'180°', 'zh-Hans':'180 度', en:'180°'}, id:'image.imageRotation.180', impl:'ps.image.imageRotation.180'},
       {n:{'zh-Hant':'90° 順時針', 'zh-Hans':'顺时针 90 度', en:'90° Clockwise'}, id:'image.imageRotation.90cw', impl:'ps.image.imageRotation.90cw'},

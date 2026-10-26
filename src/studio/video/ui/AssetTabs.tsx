@@ -67,7 +67,10 @@ function FavStar({ on, onClick, label }: { on: boolean; onClick: () => void; lab
 export const SHAPE_LABEL: Record<ShapeKind, string> = { rect: 'vedit_shape_rect', ellipse: 'vedit_shape_ellipse', arrow: 'vedit_shape_arrow', line: 'vedit_shape_line' }
 /** 动态背景名字的字典键 */
 export const BGFX_LABEL: Record<BgfxKind, string> = { stars: 'vedit_bgfx_stars', bokeh: 'vedit_bgfx_bokeh' }
-export type VectorHost = { onShape: (k: ShapeKind) => void; onSolid: (color: string) => void; /** 动态背景（星空粒子／光斑漂移） */ onBgfx?: (k: BgfxKind) => void }
+export type VectorHost = { onShape: (k: ShapeKind) => void; onSolid: (color: string) => void; /** 动态背景（星空粒子／光斑漂移） */ onBgfx?: (k: BgfxKind) => void
+  /** 空物件／摄影机／灯光（放在播放头·画面轨·自己不画） */ onRig?: (k: 'null' | 'camera' | 'light') => void }
+/** 空物件／摄影机／灯光名字的字典键 */
+const RIG_LABEL = { null: 'vedit_rig_add_null', camera: 'vedit_rig_add_camera', light: 'vedit_rig_add_light' } as const
 function VectorRow({ host }: { host: VectorHost }) {
   const t = useStudioT()
   const [color, setColor] = useState('#3b82f6')
@@ -100,6 +103,13 @@ function VectorRow({ host }: { host: VectorHost }) {
             {k === 'stars'
               ? <svg viewBox="0 0 20 20" className="w-4 h-4" aria-hidden><rect width="20" height="20" rx="2" fill="#05070f" /><circle cx="5" cy="6" r="1" fill="#fff" /><circle cx="13" cy="4" r="0.7" fill="#fff" /><circle cx="15" cy="12" r="1.2" fill="#fff" /><circle cx="8" cy="14" r="0.7" fill="#fff" /><circle cx="10" cy="9" r="0.5" fill="#fff" /></svg>
               : <svg viewBox="0 0 20 20" className="w-4 h-4" aria-hidden><rect width="20" height="20" rx="2" fill="#0b1020" /><circle cx="7" cy="8" r="4.5" fill="#ffc36b" opacity="0.45" /><circle cx="14" cy="13" r="3.5" fill="#ffc36b" opacity="0.35" /><circle cx="14" cy="5" r="2" fill="#ffc36b" opacity="0.3" /></svg>}
+          </button>
+        ))}
+        {host.onRig && (['null', 'camera', 'light'] as const).map((k) => (
+          <button key={k} type="button" data-testid="vedit-rig-item" data-kind={k} title={t(RIG_LABEL[k])} aria-label={t(RIG_LABEL[k])} onClick={() => host.onRig!(k)} className={btn.replace('cursor-grab', 'cursor-pointer')}>
+            <svg viewBox="0 0 20 20" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              {k === 'null' ? <rect x="4" y="4" width="12" height="12" strokeDasharray="2.5 2" /> : k === 'camera' ? <><rect x="2.5" y="6" width="10" height="8" rx="1" /><path d="M12.5 9l5-2.5v7l-5-2.5" /></> : <><circle cx="10" cy="10" r="3.2" /><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4" /></>}
+            </svg>
           </button>
         ))}
       </div>

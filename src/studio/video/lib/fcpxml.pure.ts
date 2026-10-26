@@ -48,7 +48,7 @@ export function docToFcpxml(doc: VideoDoc, o: { assetDir?: string; assetBase?: s
     if (c.sticker) { notes.add('sticker'); return false }
     if (c.filter || c.adjust) { notes.add('filter'); return false }
     if (c.program) { notes.add('program'); return false }
-    if (c.shape || c.solid || c.bgfx) { notes.add('shape'); return false }
+    if (c.shape || c.solid || c.bgfx || c.rig) { notes.add('shape'); return false }
     if (c.text) return true
     const m = mediaById.get(c.mediaId)
     if (!m) return false

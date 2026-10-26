@@ -30,6 +30,8 @@ export function videoAgentJob(job: { kind?: unknown; filter?: unknown; steps?: u
     return { reply: { ok: false, error: 'command_failed', message: `${where}${r.error}\nNothing was applied (all steps apply together or not at all). Fix that step and send the batch again.` } }
   }
   if (!same(r.state.media, state.media)) return { reply: { ok: false, error: 'not_available', message: 'Adding or removing media files is not available from here. Nothing was applied. Ask the user to import the file in the editor, then use media.list to get its id.' } }
+  // 程序包登记（program.define）要进工程档·这条只回轨道 ⇒ 照实拒（页面「程式」页签上传的包照常能 program.add）
+  if (!same(r.state.programs ?? {}, state.programs ?? {})) return { reply: { ok: false, error: 'not_available', message: 'Registering program packages (program.define) is not available from here. Nothing was applied. Ask the user to upload the package in the editor\'s Program tab, or use a built-in one (catalog.list {"kind":"program"}) with program.add.' } }
   const ratio = same(r.state.ratio, state.ratio) ? null : r.state.ratio
   const changed = !same(r.state.tracks, state.tracks) || !!ratio
   return { reply: { ok: true, result: { ok: true, changed, results: r.results } }, ...(changed ? { next: { tracks: r.state.tracks, ratio } } : {}) }

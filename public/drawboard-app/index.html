@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>堤麟畫板</title>
-<link rel="stylesheet" href="style.css?v=eba217c078">
+<link rel="stylesheet" href="style.css?v=4a44d01f45">
 </head>
 <body>
 
@@ -94,11 +94,11 @@
 <input type="file" id="projInput" accept=".dlcanvas,application/json" style="display:none">
 
 <script src="i18n.js?v=6a1f4280ee"></script>
-<script src="engine.js?v=6d24c34549"></script>
+<script src="engine.js?v=d0a48931b4"></script>
 <script src="humanlock.js?v=98bf5b72d7"></script>
 <!-- 左侧工具栏：图示库 + PS／AI 两套版面 + 画工具栏的本体（照抄 PS／AI 左侧工具栏） -->
 <script src="icons.js?v=7d17c02555"></script>
-<script src="toolbar-layout.js?v=3060b99f55"></script>
+<script src="toolbar-layout.js?v=bd713df74b"></script>
 <!-- 工具：一颗一支档，各自向 tools/_registry.js 登记；加工具＝加一支档＋加一行 script -->
 <script src="tools/_registry.js?v=1b180ab010"></script>
 <script src="tools/_vecsel.js?v=4ababcba85"></script>
@@ -109,9 +109,9 @@
 <script src="tools/anchorpoint.js?v=16ea2a22fb"></script>
 <script src="tools/scissors.js?v=27d2dae079"></script>
 <script src="tools/marquee.js?v=811679b2c3"></script>
-<script src="tools/brush.js?v=48d5476c50"></script>
+<script src="tools/brush.js?v=1a595dfcda"></script>
 <script src="tools/eraser.js?v=9da212b41f"></script>
-<script src="tools/bucket.js?v=b9ef98bc26"></script>
+<script src="tools/bucket.js?v=40111e0ac2"></script>
 <script src="tools/clone.js?v=3be83b45d5"></script>
 <script src="tools/pencil.js?v=65fdafd72f"></script>
 <script src="tools/spotheal.js?v=5b13c444dc"></script>
@@ -168,7 +168,7 @@
 <script src="tools/rectgrid.js?v=ab9d13ed6d"></script>
 <script src="tools/polargrid.js?v=4dfdafd838"></script>
 <script src="tools/flare.js?v=c6b86e58e6"></script>
-<script src="tools/blobbrush.js?v=afd738c237"></script>
+<script src="tools/blobbrush.js?v=929e160099"></script>
 <script src="tools/shaper.js?v=a8c875777a"></script>
 <script src="tools/aipencil.js?v=6ebe61ae06"></script>
 <script src="tools/smooth.js?v=906cf2ef6d"></script>
@@ -221,7 +221,7 @@
 <script src="tools/rect.js?v=63bca8a117"></script>
 <script src="tools/ellipse.js?v=a8eadd9af7"></script>
 <script src="tools/star.js?v=e23ce09e66"></script>
-<script src="tools/text.js?v=480f800d40"></script>
+<script src="tools/text.js?v=556f898fed"></script>
 <script src="tools/eyedropper.js?v=9b411ed7c9"></script>
 <script src="tools/hand.js?v=7f3cae505b"></script>
 <script src="tools/zoom.js?v=6c383021fc"></script>
@@ -230,34 +230,34 @@
 <script src="tools/line.js?v=fb78d6f164"></script>
 <script src="tools/wand.js?v=3b3421855d"></script>
 <script src="tools/lasso.js?v=f21f863c3b"></script>
-<script src="tools/gradient.js?v=7798c0e601"></script>
+<script src="tools/gradient.js?v=b7a6ae668e"></script>
 <script src="tools/mesh.js?v=dc0cc84751"></script>
-<script src="tools/scale.js?v=64d03ebc86"></script>
+<script src="tools/scale.js?v=60a5c09cd4"></script>
 <script src="tools/rotate.js?v=0744efd97f"></script>
 <script src="tools/crop.js?v=2992eb0ec8"></script>
-<script src="toolbar.js?v=4ea6397fcb"></script>
+<script src="toolbar.js?v=e7aac588e5"></script>
 <!-- 顶菜单：树资料一个菜单一支档（照 ArtCraft 原码的菜单目录抄，三语照 PS／AI 中文版） -->
 <script src="menubar.js?v=9a7e7c5ae7"></script>
-<script src="menus/ps-file.js?v=3d201730ed"></script><script src="menus/ps-edit.js?v=ce91b21cab"></script><script src="menus/ps-image.js?v=6667994231"></script>
-<script src="menus/ps-layer.js?v=085baff43e"></script><script src="menus/ps-type.js?v=de8bc3e0ba"></script><script src="menus/ps-select.js?v=4384039d5d"></script>
+<script src="menus/ps-file.js?v=3d201730ed"></script><script src="menus/ps-edit.js?v=3afd123746"></script><script src="menus/ps-image.js?v=6c5d7cde9f"></script>
+<script src="menus/ps-layer.js?v=085baff43e"></script><script src="menus/ps-type.js?v=de8bc3e0ba"></script><script src="menus/ps-select.js?v=fb4367e783"></script>
 <script src="menus/ps-filter.js?v=e7eec2df22"></script><script src="menus/ps-view.js?v=e432025e62"></script><script src="menus/ps-window.js?v=1434d50d88"></script>
-<script src="menus/ai-file.js?v=75da34ba7f"></script><script src="menus/ai-edit.js?v=aa829657a0"></script><script src="menus/ai-object.js?v=d9784de079"></script>
+<script src="menus/ai-file.js?v=e7aed6221e"></script><script src="menus/ai-edit.js?v=aa829657a0"></script><script src="menus/ai-object.js?v=7cc7576ea4"></script>
 <script src="menus/ai-type.js?v=19c98d0672"></script><script src="menus/ai-select.js?v=35dd5dfa82"></script><script src="menus/ai-effect.js?v=6253913e83"></script>
 <script src="menus/ai-view.js?v=bbd1345178"></script><script src="menus/ai-window.js?v=3925533359"></script><script src="menus/ai-help.js?v=893ea4910d"></script>
 <!-- 菜单各项的实作（照原码抄；命令名 ps.<原码id>／ai.<原码id>） -->
 <script src="menus/impl/panels.js?v=370bfebee9"></script>
 <script src="menus/impl/cmyk-swop.js?v=5394d75e29"></script>
-<script src="menus/impl/ps-edit.js?v=15dcf2fa18"></script>
+<script src="menus/impl/ps-edit.js?v=2c664e5328"></script>
 <script src="menus/impl/clipboard.js?v=d1100f29fa"></script>
 <script src="menus/impl/ps-layer.js?v=cdd2f3c286"></script>
 <script src="menus/impl/ps-image.js?v=ef8a9cba54"></script>
-<script src="menus/impl/psd-io.js?v=96ff3f059f"></script>
+<script src="menus/impl/psd-io.js?v=5ef5f18769"></script>
 <script src="menus/impl/vec-io.js?v=8b10dec4e0"></script>
 <script src="menus/impl/raster-io.js?v=146a75a8ae"></script>
 <script src="menus/impl/jpeg-enc.js?v=a9671ff12c"></script>
-<script src="menus/impl/ps-file.js?v=d9f275674b"></script>
-<script src="menus/impl/ps-select.js?v=5d11d3d4e4"></script>
-<script src="menus/impl/ai-object.js?v=34e73eba79"></script>
+<script src="menus/impl/ps-file.js?v=a189b9a086"></script>
+<script src="menus/impl/ps-select.js?v=af18f21e3c"></script>
+<script src="menus/impl/ai-object.js?v=55c3308e5e"></script>
 <script src="menus/impl/ai-select.js?v=da123a43d5"></script>
 <script src="menus/impl/ai-view.js?v=59f6595ffb"></script>
 <script src="menus/impl/ps-type.js?v=954970a42e"></script>
@@ -268,10 +268,10 @@
 <script src="menus/impl/ai-effect.js?v=999165c1d6"></script>
 <script src="menus/impl/ai-effect2.js?v=e1481d494d"></script>
 <script src="menus/impl/ai-edit.js?v=050ad6c54d"></script>
-<script src="menus/impl/ai-file.js?v=10dd9b4318"></script>
+<script src="menus/impl/ai-file.js?v=43397c9e1f"></script>
 <script src="menus/impl/ps-view.js?v=04705228c6"></script>
-<script src="menus/impl/ps-window.js?v=2bd90e5c8c"></script><script src="menus/impl/rp-tabs.js?v=de02e8d6f9"></script><script src="menus/impl/rp-layout.js?v=4dfdc42bc1"></script>
-<script src="menus/impl/ai-window.js?v=b782c1d499"></script>
+<script src="menus/impl/ps-window.js?v=cbd9368c73"></script><script src="menus/impl/rp-tabs.js?v=de02e8d6f9"></script><script src="menus/impl/rp-layout.js?v=30ba6d599d"></script>
+<script src="menus/impl/ai-window.js?v=5ee57cdc7e"></script>
 <script src="menus/impl/ai-libraries.js?v=0b76d9fb58"></script>
 <script src="menus/impl/ai-trace.js?v=2356cb3ad5"></script>
 <script src="menus/impl/ai-help.js?v=c976825567"></script>
@@ -282,10 +282,11 @@
 <script src="tools/vecmode.js?v=883fb8bd22"></script>
 <script src="ui.js?v=c2ee35f40c"></script>
 <script src="tools/aiui.js?v=438a1a84f8"></script>
-<script src="tools/ctxmenu.js?v=e7994d9419"></script>
+<script src="tools/ctxmenu.js?v=4d2d12e782"></script>
 <script src="tools/colorlibs.js?v=b69714e454"></script>
 <script src="tools/colorpicker.js?v=1462b3ee17"></script>
 <script src="menus/impl/docs.js?v=fe01de1d4c"></script>
+<script src="menus/impl/genai.js?v=ff491ac4d6"></script>
 <!-- 堤麟网站接线（同步画板时插的·不属上游） -->
 <script src="site-bridge.js?v=ffb5227175"></script>
 </body>

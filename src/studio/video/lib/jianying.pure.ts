@@ -63,7 +63,7 @@ export function docToJianying(doc: VideoDoc, o: { mediaRoot?: string; seed?: str
     if (c.sticker) { notes.add('sticker'); return null }
     if (c.filter || c.adjust) { notes.add('filter'); return null }
     if (c.program) { notes.add('program'); return null }
-    if (c.shape || c.solid || c.bgfx) { notes.add('shape'); return null }
+    if (c.shape || c.solid || c.bgfx || c.rig) { notes.add('shape'); return null }
     if (c.text) {
       const t = c.text, mat = id()
       if (t.fancy) notes.add('fancy')

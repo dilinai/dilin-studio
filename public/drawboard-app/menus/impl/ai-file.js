@@ -40,7 +40,7 @@ const STR = {
   fileName:S('檔案名稱：', '文件名：', 'File Name:'), format:S('格式：', '格式：', 'Format:'),
   fmtNative:S('堤麟畫板 (*.DLCANVAS)', '堤麟画板 (*.DLCANVAS)', 'Dilin Canvas (*.dlcanvas)'), fmtTpl:S('堤麟畫板範本', '堤麟画板模板', 'Dilin Canvas Template'),
   fmtPdf:S('Adobe PDF (*.PDF)', 'Adobe PDF (*.PDF)', 'Adobe PDF (*.pdf)'), fmtSvg:S('SVG (*.SVG)', 'SVG (*.SVG)', 'SVG (*.svg)'),
-  fmtSvgz:S('SVG 壓縮 (*.SVGZ)', 'SVG 压缩 (*.SVGZ)', 'SVG Compressed (*.svgz)'),
+  fmtSvgz:S('SVG 壓縮 (*.SVGZ)', 'SVG 压缩 (*.SVGZ)', 'SVG Compressed (*.svgz)'), fmtAi:S('Adobe Illustrator (*.AI)', 'Adobe Illustrator (*.AI)', 'Adobe Illustrator (*.ai)'),
   saveChangesQ:S('要儲存對「{name}」所做的變更嗎？', '要存储对“{name}”所做的更改吗？', 'Do you want to save the changes you made to “{name}”?'),
   saveChangesD:S('如果不儲存，您的變更將會遺失。', '如果不存储，您所做的更改将会丢失。', "Your changes will be lost if you don't save them."),
   revertQ:S('要回復到「{name}」的已儲存版本嗎？', '要恢复到“{name}”的存储版本吗？', 'Revert to the saved version of “{name}”?'),
@@ -151,7 +151,7 @@ const typing = t => !!t && (/input|select|textarea/i.test(t.tagName || '') || t.
 const blendCss = b => (typeof BLEND_CSS !== 'undefined' && BLEND_CSS[b]) || 'source-over';
 /* screens.rs:139 safe_name：字母、数字、-_. 留着，其余换 -（只剩点＝null） */
 const safeName = s => { const n = String(s || '').trim().replace(/[^\p{L}\p{N}\-_.]/gu, '-'); return n.replace(/\./g, '') ? n : null; };
-const stripExt = n => String(n || '').replace(/\.(dlcanvas|dltemplate|json|svgz?|pdf|png|jpe?g|webp|gif|tiff?|bmp|tga|psd|txt|dxf|eps)$/i, '');
+const stripExt = n => String(n || '').replace(/\.(dlcanvas|dltemplate|json|svgz?|pdf|ai|png|jpe?g|webp|gif|tiff?|bmp|tga|psd|txt|dxf|eps)$/i, '');
 
 /* ═══════════ 文件层资料的预设（setup.rs Default、fileinfo.rs） ═══════════ */
 const GRID_PRESETS = [['Light', ['#ffffff', '#cccccc']], ['Medium', ['#b3b3b3', '#8c8c8c']], ['Dark', ['#666666', '#4d4d4d']], ['Red', ['#ffffff', '#ffc7c7']],
@@ -1120,9 +1120,9 @@ async function exportFile(p, C){
 }
 
 /* ═══════════ 存储（save.rs） ═══════════ */
-const SAVE_FORMATS = ['dlcanvas', 'template', 'pdf', 'svg', 'svgz'];
+const SAVE_FORMATS = ['dlcanvas', 'template', 'ai', 'pdf', 'svg', 'svgz'];
 const fidelity = f => (f === 'dlcanvas' || f === 'template') ? null
-  : `${FORMATS[f] ? FORMATS[f].label : f} keeps the artwork but not everything a Dilin Canvas document holds: save as .dlcanvas to keep it all editable`;
+  : `${f === 'ai' ? 'Illustrator (.ai)' : FORMATS[f] ? FORMATS[f].label : f} keeps the artwork but not everything a Dilin Canvas document holds: save as .dlcanvas to keep it all editable`;
 const top = () => History.past[History.past.length - 1];
 /* 透过 file.saveProject 写本家档（网站版＝存进云盘）；顺手拿到写出去的那份 JSON（恢复用） */
 async function writeNative(base, tpl){
@@ -1136,8 +1136,9 @@ async function writeNative(base, tpl){
 /* mode：save｜saveAs｜copy｜template；p：{name?, format?, options?} */
 async function doSave(mode, p, C){
   p = p || {};
-  let fmt = mode === 'template' ? 'template' : String(p.format || (mode === 'save' ? AiFile.format : (formatOf(null, p.name) && SAVE_FORMATS.includes(formatOf(null, p.name)) ? formatOf(null, p.name) : 'dlcanvas'))).toLowerCase();
+  let fmt = mode === 'template' ? 'template' : String(p.format || (mode === 'save' ? AiFile.format : /\.ai$/i.test(String(p.name || '')) ? 'ai' : (formatOf(null, p.name) && SAVE_FORMATS.includes(formatOf(null, p.name)) ? formatOf(null, p.name) : 'dlcanvas'))).toLowerCase();
   if (fmt === 'vectorcraft' || fmt === 'native') fmt = 'dlcanvas';
+  if (fmt === 'illustrator') fmt = 'ai';
   if (!SAVE_FORMATS.includes(fmt)) return err(C, `Save writes ${SAVE_FORMATS.join(', ')}, not ${fmt}: use ai.document.export for other formats`);
   const stem = docStem();
   const base = baseOf(p) || (mode === 'copy' ? stem + tr('copySuffix') : mode === 'template' ? stem + tr('tplSuffix') : stem);
@@ -1148,6 +1149,12 @@ async function doSave(mode, p, C){
   if (fmt === 'dlcanvas' || fmt === 'template'){
     const w = await writeNative(base, fmt === 'template'); json = w.json;
     r = {ok:true, name:base + '.dlcanvas', format:fmt, bytes:w.bytes, warnings:[]};
+  } else if (fmt === 'ai'){
+    // Illustrator 分层档：跟 PS 模式「存储为 .ai」同一支编码（ps-file.js aiEncodeDoc＝PsFile.ai.encodeDoc），出档走 AiFile.deliver（网站版＝进云盘）
+    if (!(window.PsFile && PsFile.ai && PsFile.ai.encodeDoc)) return err(C, 'the Illustrator (.ai) writer is not loaded');
+    json = JSON.stringify(Project.serialize());
+    const e = await PsFile.ai.encodeDoc(), name = base + '.ai', d = await deliver(e.bytes, name, 'application/postscript');
+    r = {ok:true, name, format:'ai', bytes:d && d.bytes != null ? d.bytes : e.bytes.length, warnings:[fidelity('ai')].concat(e.notes || [])};
   } else {
     json = JSON.stringify(Project.serialize());
     const o = Object.assign({}, p.options || {}, {format:fmt, name:base, useArtboards:true});
@@ -1215,7 +1222,7 @@ reg('ai.file.save', '{name?, format?} 存储（file.save）：写回这份文件
   if (!AiFile.saved && !p.name){ Dialogs.saveAs('saveAs', {}); return {pending:'saveAs'}; }
   return doSave(AiFile.saved && !p.name ? 'save' : 'saveAs', p, 'ai.file.save');
 });
-reg('ai.file.saveAs', '{name?, format?: dlcanvas|template|pdf|svg|svgz（缺省＝名字的副档名，否则 dlcanvas）, options?: PDF／SVG 选项} 存储为（save.rs SaveAs）：文件改用新名字与格式；不给 name ＝开对话框（web 版：档名＋格式）→ {ok, name, format, bytes, warnings}', p => {
+reg('ai.file.saveAs', '{name?, format?: dlcanvas|template|ai|pdf|svg|svgz（缺省＝名字的副档名，否则 dlcanvas；ai＝Illustrator 分层档，跟 PS 模式 file.saveAs format:"ai" 同一支编码）, options?: PDF／SVG 选项} 存储为（save.rs SaveAs）：文件改用新名字与格式；不给 name ＝开对话框（web 版：档名＋格式）→ {ok, name, format, bytes, warnings}', p => {
   if (!p.name && !p.path){ Dialogs.saveAs('saveAs', p); return {pending:'saveAs'}; }
   return doSave('saveAs', p, 'ai.file.saveAs');
 });
@@ -1725,7 +1732,7 @@ const Dialogs = {
     Dlg.open({id:mode === 'copy' ? 'saveCopy' : mode === 'template' ? 'saveAsTemplate' : 'saveAs', title, width:420,
       body:(bd, api) => addRows(bd, api, [{k:'name', label:tr('fileName'), type:'text', value:(p && p.name) || def},
         mode === 'template' ? null : {k:'format', label:tr('format'), type:'select', value:(p && p.format) || (mode === 'saveAs' ? AiFile.format : 'dlcanvas'),
-          options:[['dlcanvas', tr('fmtNative')], ['template', tr('fmtTpl')], ['pdf', tr('fmtPdf')], ['svg', tr('fmtSvg')], ['svgz', tr('fmtSvgz')]]}]),
+          options:[['dlcanvas', tr('fmtNative')], ['template', tr('fmtTpl')], ['ai', tr('fmtAi')], ['pdf', tr('fmtPdf')], ['svg', tr('fmtSvg')], ['svgz', tr('fmtSvgz')]]}]),
       ok:async api => {
         const name = String(api.get('name') || '').trim(); if (!name) return 'File Name?';
         const fmt = mode === 'template' ? 'template' : api.get('format');

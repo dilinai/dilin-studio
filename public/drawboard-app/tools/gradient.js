@@ -473,6 +473,64 @@ function affInv(m){
 
 const GF = window.GradientFill = {
   isGrad(p){ return !!p && typeof p === 'object' && (p.type === 'linear' || p.type === 'radial') && Array.isArray(p.stops); },
+  /* 任意形状渐变（Illustrator Freeform Gradient）：{type:"freeform", mode:"points"|"lines", points:[{x,y（图层坐标）, color, opacity?, spread? 0..1}],
+     lines:[[点索引…]…]（线模式：一条条折线，点沿线插色）, box:[x0,y0,x1,y1]（铺色的范围＝套用时形状外框，图层坐标）}
+     色＝反距离加权（Shepard，1/d²）：独立的点一个源；线上每一段一个源（颜色按投影位置在两端点间插）；spread 越大影响越远（距离 ÷ (0.5＋spread)） */
+  isFree(p){ return !!p && typeof p === 'object' && p.type === 'freeform' && Array.isArray(p.points); },
+  freeColor(p, q){
+    const P = p.points, inLine = new Set(), acc = [0, 0, 0, 0]; let wsum = 0;
+    const put = (c, op, d, sp) => {const k = 0.5 + clamp(fin(+sp) ? +sp : 0.5, 0, 1), w = 1 / ((d / k) * (d / k) + 1e-4); acc[0] += c[0] * op * w; acc[1] += c[1] * op * w; acc[2] += c[2] * op * w; acc[3] += op * w; wsum += w; };
+    const col = o => parseHex(o.color) || [0, 0, 0, 1], opa = o => fin(+o.opacity) ? clamp(+o.opacity, 0, 1) : 1;
+    for (const ln of (p.lines || [])){
+      const idx = (ln || []).filter(i => P[i]); idx.forEach(i => inLine.add(i));
+      for (let k = 0; k + 1 < idx.length; k++){
+        const a = P[idx[k]], b = P[idx[k + 1]], ab = [b.x - a.x, b.y - a.y], l2 = dot(ab, ab);
+        const t = l2 > 1e-12 ? clamp(dot([q[0] - a.x, q[1] - a.y], ab) / l2, 0, 1) : 0;
+        const ca = col(a), cb = col(b), c = [0, 1, 2].map(j => ca[j] + (cb[j] - ca[j]) * t), op = opa(a) + (opa(b) - opa(a)) * t;
+        put(c, op, dist(q, [a.x + ab[0] * t, a.y + ab[1] * t]), (fin(+a.spread) ? +a.spread : 0.5) * (1 - t) + (fin(+b.spread) ? +b.spread : 0.5) * t);
+      }
+      if (idx.length === 1){ const a = P[idx[0]]; put(col(a), opa(a), dist(q, [a.x, a.y]), a.spread); }
+    }
+    P.forEach((a, i) => { if (!inLine.has(i)) put(col(a), opa(a), dist(q, [a.x, a.y]), a.spread); });
+    if (!(wsum > 0) || !(acc[3] > 1e-9)) return [0, 0, 0, 0];
+    return [acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3], acc[3] / wsum];
+  },
+  /* 铺色的范围（图层坐标）：存的 box，没有就点的外框外扩 */
+  freeBox(p){
+    if (Array.isArray(p.box) && p.box.length === 4 && p.box.every(fin) && p.box[2] > p.box[0] && p.box[3] > p.box[1]) return p.box.slice();
+    const xs = p.points.map(o => +o.x || 0), ys = p.points.map(o => +o.y || 0);
+    if (!xs.length) return [0, 0, 1, 1];
+    const pad = 20; return [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad];
+  },
+  _freeCache: new Map(),
+  /* 一张铺满 box 的色图（长边至多 160 格，画的时候放大＋平滑）；同样的资料共用一张 */
+  freeImage(p){
+    const key = JSON.stringify([p.points, p.lines || [], p.box || null]);
+    const hit = GF._freeCache.get(key); if (hit) return hit;
+    const b = GF.freeBox(p), w = b[2] - b[0], h = b[3] - b[1], g = Math.min(1, 160 / Math.max(w, h, 1));
+    const cw = Math.max(2, Math.ceil(w * g)), ch = Math.max(2, Math.ceil(h * g));
+    const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+    const x = c.getContext('2d'), im = x.createImageData(cw, ch), d = im.data;
+    for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++){
+      const q = GF.freeColor(p, [b[0] + (i + 0.5) / cw * w, b[1] + (j + 0.5) / ch * h]), o = (j * cw + i) * 4;
+      d[o] = Math.round(clamp(q[0], 0, 1) * 255); d[o + 1] = Math.round(clamp(q[1], 0, 1) * 255); d[o + 2] = Math.round(clamp(q[2], 0, 1) * 255); d[o + 3] = Math.round(clamp(q[3], 0, 1) * 255);
+    }
+    x.putImageData(im, 0, 0);
+    const out = {canvas:c, box:b};
+    if (GF._freeCache.size > 32) GF._freeCache.delete(GF._freeCache.keys().next().value);
+    GF._freeCache.set(key, out);
+    return out;
+  },
+  /* 画布用：跟目标画布同尺寸的离屏、照当前变换把色图贴到 box ⇒ 图样（图样矩阵＝当前变换的反矩阵，同 _ellipse） */
+  _free(ctx, p, S){
+    const T = ctx.getTransform(), cv = ctx.canvas, fi = GF.freeImage(p), b = fi.box;
+    const c = document.createElement('canvas'); c.width = Math.max(1, cv.width); c.height = Math.max(1, cv.height);
+    const x = c.getContext('2d'); x.setTransform(T); x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
+    x.drawImage(fi.canvas, b[0] * S, b[1] * S, (b[2] - b[0]) * S, (b[3] - b[1]) * S);
+    const pat = ctx.createPattern(c, 'no-repeat');
+    pat.setTransform(T.inverse());
+    return pat;
+  },
   /* 色标整理：排序（同 offset 保原序）、补缺省 */
   stops(p){
     const st = ((p && p.stops) || []).map((s, i) => ({
@@ -574,6 +632,7 @@ const GF = window.GradientFill = {
   toCanvas(ctx, shape, scale, which){
     const S = fin(scale) ? scale : 1;
     const p = (which && typeof which === 'object') ? which : shape[which === 'stroke' ? 'stroke' : 'fill'];
+    if (GF.isFree(p)) return GF._free(ctx, p, S);
     if (!GF.isGrad(p)) return typeof p === 'string' ? p : 'rgba(0,0,0,0)';
     const st = GF.stops(p), ex = GF.expanded(st), g = GF.geom(p);
     if (!st.length) return 'rgba(0,0,0,0)';
@@ -604,6 +663,7 @@ const GF = window.GradientFill = {
   },
   /* 给 engine.js shiftShape 与别的工具：整个渐变平移（就地） */
   shift(p, dx, dy){
+    if (GF.isFree(p) && (dx || dy)){ p.points.forEach(o => { o.x = (+o.x || 0) + dx; o.y = (+o.y || 0) + dy; }); if (Array.isArray(p.box)) p.box = [p.box[0] + dx, p.box[1] + dy, p.box[2] + dx, p.box[3] + dy]; return p; }
     if (!GF.isGrad(p) || (!dx && !dy)) return p;
     ['x1', 'x2', 'fx'].forEach(k => { if (fin(p[k])) p[k] += dx; });
     ['y1', 'y2', 'fy'].forEach(k => { if (fin(p[k])) p[k] += dy; });
@@ -611,6 +671,12 @@ const GF = window.GradientFill = {
   },
   /* GradientGeom::transform（gradient.rs:304-345）：给旋转／比例缩放工具套仿射 m=[a,b,c,d,e,f]（就地，图层坐标） */
   transform(p, m){
+    if (GF.isFree(p)){                                   // 任意形状：每个点照套；铺色范围＝四角变换后的外框
+      p.points.forEach(o => { const q = aff(m, [+o.x || 0, +o.y || 0]); o.x = q[0]; o.y = q[1]; });
+      if (Array.isArray(p.box)){ const b = p.box, cs = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]].map(q => aff(m, q));
+        p.box = [Math.min(...cs.map(q => q[0])), Math.min(...cs.map(q => q[1])), Math.max(...cs.map(q => q[0])), Math.max(...cs.map(q => q[1]))]; }
+      return p;
+    }
     if (!GF.isGrad(p)) return p;
     const g = GF.geom(p), kind = p.type;
     g.focal = g.focal ? aff(m, g.focal) : null;
@@ -640,6 +706,10 @@ const GF = window.GradientFill = {
   },
   /* 给 engine.js Project.toSVG：一个 <linearGradient>/<radialGradient>（userSpaceOnUse，图层坐标；径向用单位圆＋gradientTransform 表达长宽比与焦点） */
   toSVG(p, id){
+    if (GF.isFree(p)){                                   // SVG 没有任意形状渐变：铺色图当 <pattern> 里的一张图（图层坐标、只铺 box 一次）
+      const f = v => +(+v).toFixed(4), fi = GF.freeImage(p), b = fi.box, w = f(b[2] - b[0]), h = f(b[3] - b[1]);
+      return `<pattern id="${id}" patternUnits="userSpaceOnUse" x="${f(b[0])}" y="${f(b[1])}" width="${w}" height="${h}"><image href="${fi.canvas.toDataURL('image/png')}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none"/></pattern>`;
+    }
     if (!GF.isGrad(p)) return '';
     const f = v => +(+v).toFixed(4), st = GF.stops(p), g = GF.geom(p);
     const stops = GF.expanded(st).map(e => `<stop offset="${f(clamp(e[0], 0, 1))}" stop-color="${toHex(e.slice(1))}" stop-opacity="${f(e[4])}"/>`).join('');
@@ -997,6 +1067,165 @@ CMD.reg('gradient.get', {i18n:'', params:'{id?（缺省＝第一个选中的有�
   return {ok:true, id:s.id, paint:JSON.parse(JSON.stringify(s[key])), start:g.start, end:g.end, aspect:g.aspect, focal:g.focal, angle:angleDeg(g), selectedStop:selectedStop(vcx())};
 });
 
+/* ── 任意形状渐变（Illustrator 渐变面板「任意形状」：点模式／线模式；色标＝画布上的点，渐变工具可拖、点物件里加点、Alt＋点删点）──
+   资料见 GF.isFree；只做填色（AI 的任意形状渐变也只给填色）。命令收文件坐标、存图层坐标。 */
+const FF_COLORS = ['#ff3b30', '#ffcc00', '#34c759', '#007aff'];
+const ffActive = cx => cx && !cx.stroke ? cx.sel.find(s => GF.isFree(s.fill)) || null : null;
+function ffOne(p, C){
+  const L = vLayer(p); if (!L) return {err:{ok:false, error:`${C}: not a vector layer`}};
+  const s = p.id ? L.data.shapes.find(x => x.id === p.id) : targetsOf(L, {}).find(x => GF.isFree(x.fill));
+  if (!s || !GF.isFree(s.fill)) return {err:{ok:false, error:`${C}: the selected object has no freeform gradient (run gradient.freeform.apply first)`}};
+  return {L, s, g:s.fill};
+}
+/* 一个点的参数（文件坐标；opacity／spread 是 %）→ 资料（图层坐标、0..1）；错了丢错 */
+function ffPoint(L, o, C, i, base){
+  if (!o || typeof o !== 'object') throw new Error(`${C}: point ${i} must be an object {x, y, color, opacity?, spread?}`);
+  const x = o.x !== undefined ? +o.x : base ? base.x + L.x : NaN, y = o.y !== undefined ? +o.y : base ? base.y + L.y : NaN;
+  if (!fin(x) || !fin(y)) throw new Error(`${C}: point ${i} needs numeric \`x\`, \`y\` (document coordinates)`);
+  const out = {x:x - L.x, y:y - L.y, color:base ? base.color : '#000000'};
+  if (o.color !== undefined){ const c = normColor(o.color); if (!c) throw new Error(`${C}: point ${i}: bad \`color\` (#rrggbb)`); out.color = c; }
+  const pct = (k, d) => { if (o[k] === undefined || o[k] === null) return d; if (!fin(+o[k])) throw new Error(`${C}: point ${i}: \`${k}\` must be a number 0..100 (%)`); return clamp(+o[k] / 100, 0, 1); };
+  const op = pct('opacity', base && fin(base.opacity) ? base.opacity : 1), sp = pct('spread', base && fin(base.spread) ? base.spread : 0.5);
+  if (op !== 1) out.opacity = op;
+  out.spread = sp;
+  return out;
+}
+function ffLines(v, n, C){
+  if (!Array.isArray(v)) throw new Error(`${C}: \`lines\` must be an array of point-index arrays`);
+  return v.map((ln, k) => {
+    if (!Array.isArray(ln) || ln.length < 2) throw new Error(`${C}: line ${k} needs at least two point indices`);
+    return ln.map(i => { if (!Number.isInteger(i) || i < 0 || i >= n) throw new Error(`${C}: line ${k}: no point ${i}`); return i; });
+  });
+}
+const ffOut = (L, g) => ({mode:g.mode === 'lines' ? 'lines' : 'points', points:g.points.map(o => ({x:o.x + L.x, y:o.y + L.y, color:o.color, opacity:Math.round((fin(o.opacity) ? o.opacity : 1) * 1000) / 10, spread:Math.round((fin(o.spread) ? o.spread : 0.5) * 1000) / 10})), lines:(g.lines || []).map(l => l.slice())});
+const FF = {
+  apply(p){
+    const C = 'gradient.freeform.apply';
+    const L = vLayer(p); if (!L) return {ok:false, error:`${C}: not a vector layer`};
+    const T = targetsOf(L, p); if (!T.length) return {ok:false, error:`${C}: nothing selected`};
+    const mode = p.mode === undefined ? 'points' : p.mode;
+    if (mode !== 'points' && mode !== 'lines') return {ok:false, error:`${C}: \`mode\` must be "points" or "lines"`};
+    const out = [];
+    try {
+      for (const s of T){
+        const b = paintBounds(L, s, false); if (!b) throw new Error(`${C}: object ${s.id} has no area to fill`);
+        const box = [b[0] - L.x, b[1] - L.y, b[2] - L.x, b[3] - L.y], w = box[2] - box[0], h = box[3] - box[1];
+        let pts;
+        if (p.points !== undefined){
+          if (!Array.isArray(p.points) || !p.points.length) throw new Error(`${C}: \`points\` must be a non-empty array`);
+          pts = p.points.map((o, i) => ffPoint(L, o, C, i));
+        } else {                                          // 预设：外框里 25%／75% 四个点（AI 套用时也是自动放几个点、颜色取色板）
+          pts = [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]].map(([u, v], i) => ({x:box[0] + w * u, y:box[1] + h * v, color:FF_COLORS[i], spread:0.5}));
+        }
+        let lines = [];
+        if (p.lines !== undefined) lines = ffLines(p.lines, pts.length, C);
+        else if (mode === 'lines' && pts.length >= 2) lines = [pts.map((_, i) => i)];
+        out.push([s, {type:'freeform', mode, points:pts, lines, box}]);
+      }
+    } catch (e){ return {ok:false, error:e.message}; }
+    out.forEach(([s, g]) => { s.fill = g; });
+    Layer.invalidate(L);
+    VG.ffSel = null;
+    return Object.assign({ok:true, ids:T.map(s => s.id)}, ffOut(L, out[0][1]));
+  },
+  addPoint(p){
+    const C = 'gradient.freeform.addPoint', r = ffOne(p, C); if (r.err) return r.err;
+    const {L, s, g} = r;
+    let pt;
+    try { pt = ffPoint(L, p, C, 0); } catch (e){ return {ok:false, error:e.message}; }
+    if (p.color === undefined){ const c = GF.freeColor(g, [pt.x, pt.y]); pt.color = toHex(c); }   // 没给颜色＝那一点现在的颜色（AI 点下去的新点也是）
+    const i = g.points.length, lines = g.lines || [];
+    let link = null;                                          // 线模式：[线索引, 接法]
+    if (g.mode === 'lines'){
+      if (p.line === 'new'){ if (!Number.isInteger(p.from) || !g.points[p.from]) return {ok:false, error:`${C}: line:"new" needs \`from\` (an existing point index)`}; link = ['new', p.from]; }
+      else if (p.line !== undefined){ if (!Number.isInteger(p.line) || !lines[p.line]) return {ok:false, error:`${C}: no line ${p.line}`}; link = [p.line]; }
+      else if (lines.length) link = [lines.length - 1];      // 缺省＝接在最后一条线尾
+      else if (i > 0) link = ['new', i - 1];
+    }
+    g.points.push(pt);
+    if (link){ g.lines = lines; if (link[0] === 'new') lines.push([link[1], i]); else lines[link[0]].push(i); }
+    Layer.invalidate(L);
+    VG.ffSel = {id:s.id, index:i};
+    return {ok:true, id:s.id, index:i, color:pt.color};
+  },
+  movePoint(p){
+    const C = 'gradient.freeform.movePoint', r = ffOne(p, C); if (r.err) return r.err;
+    const {L, s, g} = r, i = p.index;
+    if (!Number.isInteger(i) || !g.points[i]) return {ok:false, error:`${C}: no point ${i}`};
+    if (!fin(+p.x) || !fin(+p.y)) return {ok:false, error:`${C}: needs numeric \`x\`, \`y\` (document coordinates)`};
+    g.points[i].x = +p.x - L.x; g.points[i].y = +p.y - L.y;
+    Layer.invalidate(L);
+    return {ok:true, id:s.id, index:i};
+  },
+  setPoint(p){
+    const C = 'gradient.freeform.setPoint', r = ffOne(p, C); if (r.err) return r.err;
+    const {L, s, g} = r, i = p.index !== undefined ? p.index : (VG.ffSel && VG.ffSel.id === s.id ? VG.ffSel.index : null);
+    if (!Number.isInteger(i) || !g.points[i]) return {ok:false, error:`${C}: no point ${i}`};
+    let pt;
+    try { pt = ffPoint(L, {x:p.x, y:p.y, color:p.color, opacity:p.opacity, spread:p.spread}, C, i, g.points[i]); } catch (e){ return {ok:false, error:e.message}; }
+    g.points[i] = pt;
+    Layer.invalidate(L);
+    return {ok:true, id:s.id, index:i};
+  },
+  deletePoint(p){
+    const C = 'gradient.freeform.deletePoint', r = ffOne(p, C); if (r.err) return r.err;
+    const {L, s, g} = r, i = p.index !== undefined ? p.index : (VG.ffSel && VG.ffSel.id === s.id ? VG.ffSel.index : null);
+    if (!Number.isInteger(i) || !g.points[i]) return {ok:false, error:`${C}: no point ${i}`};
+    if (g.points.length <= 1) return {ok:false, error:`${C}: a freeform gradient keeps at least one point`};
+    g.points.splice(i, 1);
+    g.lines = (g.lines || []).map(ln => ln.filter(k => k !== i).map(k => k > i ? k - 1 : k)).filter(ln => ln.length >= 2);
+    Layer.invalidate(L);
+    VG.ffSel = null;
+    return {ok:true, id:s.id, points:g.points.length};
+  },
+  setMode(p){
+    const C = 'gradient.freeform.setMode', r = ffOne(p, C); if (r.err) return r.err;
+    const {L, s, g} = r;
+    if (p.mode !== 'points' && p.mode !== 'lines') return {ok:false, error:`${C}: \`mode\` must be "points" or "lines"`};
+    g.mode = p.mode;
+    if (p.mode === 'points') g.lines = [];                   // 点模式：线拆掉，各点各自独立
+    else if (!(g.lines || []).length && g.points.length >= 2) g.lines = [g.points.map((_, k) => k)];   // 线模式：照点的先后连成一条
+    Layer.invalidate(L);
+    return Object.assign({ok:true, id:s.id}, ffOut(L, g));
+  }
+};
+const FF_BODY = {'gradient.freeform.movePoint':FF.movePoint};
+const FFP = '（文件坐标 x, y；color "#rrggbb"；opacity 0..100 %=100；spread 0..100 %=50＝影响范围）';
+CMD.reg('gradient.freeform.apply', {i18n:'', undoable:true,
+  params:`{mode?:"points"|"lines"="points", points?:[{x, y, color, opacity?, spread?}]${FFP}（缺省＝外框 25%／75% 四个点）, lines?:[[点索引…]…]（线模式的折线；缺省＝全部点照先后连一条）, ids?:[shapeId…]（缺省＝选中的）, layerId?} 渐变面板「任意形状」：选中物件的填色换成任意形状渐变 → {ok, ids, mode, points, lines}`},
+  FF.apply);
+CMD.reg('gradient.freeform.addPoint', {i18n:'', undoable:true,
+  params:`{x, y, color?（缺省＝那一点现在的颜色）, opacity?, spread?${FFP}, line?:线索引（线模式：接在哪条线尾；缺省＝最后一条）|"new"（另起一条，配 from:点索引）, id?:shapeId（缺省＝第一个选中的任意形状渐变）, layerId?} 加一个色标点（渐变工具在物件里点一下）→ {ok, id, index, color}`},
+  FF.addPoint);
+CMD.reg('gradient.freeform.movePoint', {i18n:'', undoable:true,
+  params:'{index, x, y（文件坐标）, id?, layerId?} 搬一个色标点（渐变工具拖点；拖的途中预览、放开才进一步历史）→ {ok, id, index}'},
+  FF.movePoint);
+CMD.reg('gradient.freeform.setPoint', {i18n:'', undoable:true,
+  params:`{index?（缺省＝选中的点）, color?, opacity?, spread?, x?, y?${FFP}, id?, layerId?} 改一个色标点的颜色／不透明度／扩展 → {ok, id, index}`},
+  FF.setPoint);
+CMD.reg('gradient.freeform.deletePoint', {i18n:'', undoable:true,
+  params:'{index?（缺省＝选中的点）, id?, layerId?} 删一个色标点（至少留 1 个；线上的点删掉那条线跟着缩，剩不到两点的线拿掉；渐变工具 Alt＋点、Delete）→ {ok, id, points}'},
+  FF.deletePoint);
+CMD.reg('gradient.freeform.setMode', {i18n:'', undoable:true,
+  params:'{mode:"points"|"lines", id?, layerId?} 点模式／线模式（点→线：没线就照点的先后连成一条；线→点：线拆掉）→ {ok, id, mode, points, lines}'},
+  FF.setMode);
+CMD.reg('gradient.freeform.get', {i18n:'', params:'{id?, layerId?} → {ok, id, mode, points:[{x, y（文件坐标）, color, opacity %, spread %}], lines, selectedPoint}'}, p => {
+  const r = ffOne(p, 'gradient.freeform.get'); if (r.err) return r.err;
+  return Object.assign({ok:true, id:r.s.id}, ffOut(r.L, r.g), {selectedPoint:VG.ffSel && VG.ffSel.id === r.s.id ? VG.ffSel.index : null});
+});
+CMD.reg('gradient.freeform.selectPoint', {i18n:'', params:'{index|null, id?, layerId?} 选一个色标点（渐变面板改色、Delete 作用在它；不进历史）→ {ok, index}'}, p => {
+  if (p.index === null || p.index === undefined){ VG.ffSel = null; return {ok:true, index:null}; }
+  const r = ffOne(p, 'gradient.freeform.selectPoint'); if (r.err) return r.err;
+  if (!Number.isInteger(p.index) || !r.g.points[p.index]) return {ok:false, error:`gradient.freeform.selectPoint: no point ${p.index}`};
+  VG.ffSel = {id:r.s.id, index:p.index}; return {ok:true, index:p.index};
+});
+const FF_HIT = 7;
+function ffHit(cx, s, p){
+  const g = s.fill; let best = null;
+  g.points.forEach((o, i) => { const d = dist([o.x + cx.L.x, o.y + cx.L.y], p); if (d <= cx.tol(FF_HIT) && (!best || d <= best.d)) best = {i, d}; });
+  return best ? best.i : null;
+}
+
 /* ── 手势（xform/gradient.rs press／drag／release／key／DoubleClick）── */
 function beginPreview(cx){ VG.preview = {L:cx.L, snaps:cx.L.data.shapes.map(s => [s, VecSel.cloneShape(s)])}; }
 function restorePreview(){
@@ -1007,7 +1236,7 @@ function restorePreview(){
 function preview(cmd, params){                            // Action::Preview：在原样上套一次本体（不进历史）
   restorePreview();
   VG.last = {cmd, params};
-  const fn = cmd === 'gradient.setGeom' ? setGeomBody : editBody;
+  const fn = FF_BODY[cmd] || (cmd === 'gradient.setGeom' ? setGeomBody : editBody);
   fn(params);
 }
 const geomParams = (cx, s, e) => ({start:s.slice(), end:e.slice(), stroke:cx.stroke});
@@ -1016,6 +1245,12 @@ const runSelectStop = i => { try { CMD.run('gradient.selectStop', {index:i}); } 
 
 const V = {
   press(cx, p, m){
+    const ff = ffActive(cx);
+    if (ff){                                              // 任意形状渐变：按到点＝选它（拖＝搬、Alt＝删）；按物件里别处＝加点
+      const i = ffHit(cx, ff, p);
+      if (i !== null){ VG.ffSel = {id:ff.id, index:i}; VG.gesture = {grab:{k:m.alt ? 'ffdel' : 'ffpt', id:ff.id, index:i, from:[ff.fill.points[i].x + cx.L.x, ff.fill.points[i].y + cx.L.y]}, at:p.slice(), began:false}; return; }
+      if (hitShape(cx.L, p, cx.tol(3)) === ff){ VG.gesture = {grab:{k:'ffadd', id:ff.id}, at:p.slice(), began:false}; return; }
+    }
     const a = annotatorOf(cx), h = a ? Ann.hit(cx, a, p) : null;
     let grab;
     if (h){
@@ -1051,7 +1286,9 @@ const V = {
       const r = snapDraw(cx, to); guides = r.guides; return r.p;
     };
     const G = g.grab; let cmd, params;
-    if (G.k === 'art'){ const end = place(g.at, p); g.vector = [g.at, end]; cmd = 'gradient.setGeom'; params = geomParams(cx, g.at, end); }
+    if (G.k === 'ffpt'){ const q = place(G.from, add(G.from, sub(p, g.at))); cmd = 'gradient.freeform.movePoint'; params = {id:G.id, index:G.index, x:q[0], y:q[1]}; }
+    else if (G.k === 'ffadd' || G.k === 'ffdel'){}         // 加点／删点只认点一下
+    else if (G.k === 'art'){ const end = place(g.at, p); g.vector = [g.at, end]; cmd = 'gradient.setGeom'; params = geomParams(cx, g.at, end); }
     else if (G.k === 'move'){ const st = place(G.geom.start, add(G.geom.start, sub(p, g.at))); cmd = 'gradient.setGeom'; params = geomParams(cx, st, add(st, sub(G.geom.end, G.geom.start))); }
     else if (G.k === 'end'){ cmd = 'gradient.setGeom'; params = geomParams(cx, G.geom.start, place(G.geom.start, p)); }
     else if (G.k === 'rotate'){
@@ -1096,6 +1333,9 @@ const V = {
       return;
     }
     const cx2 = vcx(); if (!cx2) return;
+    if (g.grab.k === 'ffadd'){ CMD.run('gradient.freeform.addPoint', {id:g.grab.id, x:p[0], y:p[1]}); return; }
+    if (g.grab.k === 'ffdel'){ CMD.run('gradient.freeform.deletePoint', {id:g.grab.id, index:g.grab.index}); return; }
+    if (g.grab.k === 'ffpt') return;                       // 点一下＝只选
     if (g.grab.k === 'move' && g.grab.bar !== null){      // 点线条＝在那里加色标（颜色取那一点的颜色），并选它
       const a = annotatorOf(cx2); if (!a) return;
       const [st, i] = insertStop(a.stops, g.grab.bar);
@@ -1130,6 +1370,11 @@ const V = {
     if (!cx || (VG.gesture && VG.gesture.began)) return false;
     const k = e.key;
     if (!['Delete', 'Backspace', 'ArrowLeft', 'ArrowRight'].includes(k)) return false;
+    const ff = ffActive(cx);
+    if (ff && VG.ffSel && VG.ffSel.id === ff.id && ff.fill.points[VG.ffSel.index]){
+      if (k === 'Delete' || k === 'Backspace'){ if (ff.fill.points.length > 1) CMD.run('gradient.freeform.deletePoint', {id:ff.id, index:VG.ffSel.index}); return true; }
+      return false;
+    }
     const a = annotatorOf(cx), i = selectedStop(cx);
     if (!a || i === null || i >= a.stops.length) return false;
     let v, sel;
@@ -1145,7 +1390,9 @@ const V = {
   },
   cursor(cx, p){
     const g = VG.gesture;
-    if (g){ if (g.grab.k === 'stop' && g.stop === null) return 'not-allowed'; if (g.grab.k === 'rotate') return 'alias'; if (g.grab.k === 'art') return 'crosshair'; return 'move'; }
+    if (g){ if (g.grab.k === 'stop' && g.stop === null) return 'not-allowed'; if (g.grab.k === 'rotate') return 'alias'; if (g.grab.k === 'art' || g.grab.k === 'ffadd') return 'crosshair'; return 'move'; }
+    const ff = ffActive(cx);
+    if (ff) return ffHit(cx, ff, p) !== null ? 'move' : hitShape(cx.L, p, cx.tol(3)) === ff ? 'copy' : 'crosshair';
     const a = annotatorOf(cx), h = a ? Ann.hit(cx, a, p) : null;
     if (!h) return 'crosshair';
     return h.part === 'bar' ? 'copy' : h.part === 'rotate' ? 'alias' : 'move';
@@ -1198,8 +1445,20 @@ function drawVector(ctx, s){
   // 选中物件的细框（选取回馈）
   ctx.strokeStyle = ACCENT; ctx.lineWidth = 1;
   for (const sh of cx.sel){ const g = VecSel.asBezier(sh); if (!g) continue; ctx.save(); ctx.translate(cx.L.x * s, cx.L.y * s); ctx.beginPath(); bezierPath(ctx, g, s); ctx.stroke(); ctx.restore(); }
-  let a = annotatorOf(cx);
-  if (!a && VG.gesture && VG.gesture.vector) a = {kind:'linear', geom:{start:VG.gesture.vector[0], end:VG.gesture.vector[1], aspect:1, focal:null}, stops:defaultStops()};
+  const ff = ffActive(cx);
+  if (ff){                                                // 任意形状渐变：线（线模式）＋色标点（选中的蓝圈）
+    const g = ff.fill, D = o => P([o.x + cx.L.x, o.y + cx.L.y]);
+    ctx.lineWidth = 2 * dpr; ctx.strokeStyle = LIGHT;
+    for (const ln of (g.lines || [])){ ctx.beginPath(); ln.forEach((i, k) => { if (!g.points[i]) return; const q = D(g.points[i]); k ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); }); ctx.stroke(); ctx.save(); ctx.lineWidth = 1 * dpr; ctx.strokeStyle = BAR; ctx.setLineDash([3 * dpr, 2 * dpr]); ctx.stroke(); ctx.restore(); }
+    g.points.forEach((o, i) => {
+      const q = D(o), on = VG.ffSel && VG.ffSel.id === ff.id && VG.ffSel.index === i;
+      ctx.beginPath(); ctx.arc(q[0], q[1], 6 * dpr, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.beginPath(); ctx.arc(q[0], q[1], 4.5 * dpr, 0, Math.PI * 2); ctx.fillStyle = o.color; ctx.fill();
+      ctx.beginPath(); ctx.arc(q[0], q[1], 6 * dpr, 0, Math.PI * 2); ctx.lineWidth = (on ? 2.5 : 1) * dpr; ctx.strokeStyle = on ? ACCENT : BAR; ctx.stroke();
+    });
+  }
+  let a = ff ? null : annotatorOf(cx);
+  if (!a && !ff && VG.gesture && VG.gesture.vector) a = {kind:'linear', geom:{start:VG.gesture.vector[0], end:VG.gesture.vector[1], aspect:1, focal:null}, stops:defaultStops()};
   if (a){
     const st = P(a.geom.start), en = P(a.geom.end), selI = selectedStop(cx);
     const handle = (q, fill) => { ctx.beginPath(); ctx.arc(q[0], q[1], 3.5 * dpr, 0, Math.PI * 2); ctx.fillStyle = fill || '#fff'; ctx.fill(); ctx.strokeStyle = BAR; ctx.lineWidth = 1 * dpr; ctx.stroke(); };
@@ -1295,6 +1554,8 @@ const STRINGS = {
     'opt.gradAngle':'角度', 'opt.gradAspect':'長寬比', 'opt.gradSmart':'智慧型參考線',
     'ui.gradLinear':'線性漸層', 'ui.gradRadial':'放射性漸層', 'ui.gradAngle':'角度漸層', 'ui.gradReflected':'反射性漸層', 'ui.gradDiamond':'菱形漸層',
     'ui.gradKindLinear':'線性', 'ui.gradKindRadial':'放射狀', 'ui.gradReverseBtn':'反轉漸層',
+    'ui.gradKindFree':'任意形狀', 'ui.gradFfPoints':'點', 'ui.gradFfLines':'線',
+    'ui.gradFfHint':'任意形狀漸層：拖色標點移動 · 在物件內按一下加點（線模式接在線尾）· Alt＋按點或 Delete 刪點',
     'ui.gradStopColor':'顏色', 'ui.gradStopOpacity':'不透明度 %', 'ui.gradStopLocation':'位置 %',
     'ui.gradLegacy':'＋ 舊版漸層（金屬…）',
     'ui.gradRasterHint':'拖曳畫出漸層 · Shift 鎖 45° · 有選取範圍只畫範圍內',
@@ -1304,6 +1565,8 @@ const STRINGS = {
     'opt.gradAngle':'角度', 'opt.gradAspect':'长宽比', 'opt.gradSmart':'智能参考线',
     'ui.gradLinear':'线性渐变', 'ui.gradRadial':'径向渐变', 'ui.gradAngle':'角度渐变', 'ui.gradReflected':'对称渐变', 'ui.gradDiamond':'菱形渐变',
     'ui.gradKindLinear':'线性', 'ui.gradKindRadial':'径向', 'ui.gradReverseBtn':'反向渐变',
+    'ui.gradKindFree':'任意形状', 'ui.gradFfPoints':'点', 'ui.gradFfLines':'线',
+    'ui.gradFfHint':'任意形状渐变：拖色标点移动 · 在物件内单击加点（线模式接在线尾）· Alt＋单击点或 Delete 删点',
     'ui.gradStopColor':'颜色', 'ui.gradStopOpacity':'不透明度 %', 'ui.gradStopLocation':'位置 %',
     'ui.gradLegacy':'＋ 旧版渐变（金属…）',
     'ui.gradRasterHint':'拖动画出渐变 · Shift 锁 45° · 有选区只画选区内',
@@ -1313,6 +1576,8 @@ const STRINGS = {
     'opt.gradAngle':'Angle', 'opt.gradAspect':'Aspect Ratio', 'opt.gradSmart':'Smart Guides',
     'ui.gradLinear':'Linear Gradient', 'ui.gradRadial':'Radial Gradient', 'ui.gradAngle':'Angle Gradient', 'ui.gradReflected':'Reflected Gradient', 'ui.gradDiamond':'Diamond Gradient',
     'ui.gradKindLinear':'Linear', 'ui.gradKindRadial':'Radial', 'ui.gradReverseBtn':'Reverse Gradient',
+    'ui.gradKindFree':'Freeform', 'ui.gradFfPoints':'Points', 'ui.gradFfLines':'Lines',
+    'ui.gradFfHint':'Freeform gradient: drag a colour stop to move it  ·  click inside the art to add one (Lines mode extends the line)  ·  Alt-click a stop or press Delete to remove it',
     'ui.gradStopColor':'Color', 'ui.gradStopOpacity':'Opacity %', 'ui.gradStopLocation':'Location %',
     'ui.gradLegacy':'+ Legacy Gradients (Metals…)',
     'ui.gradRasterHint':'Drag to draw a gradient  ·  Shift snaps to 45°  ·  only inside the selection',
@@ -1366,6 +1631,15 @@ function buildVectorOptions(box, add){
   const edit = p => { try { CMD.run('gradient.edit', p); } catch (e){} refreshOptions(); };
   btn(box, Lang.t('ui.gradKindLinear'), 'ui.gradKindLinear', !!a && a.kind === 'linear', () => edit({kind:'linear'}), {kind:'linear'});
   btn(box, Lang.t('ui.gradKindRadial'), 'ui.gradKindRadial', !!a && a.kind === 'radial', () => edit({kind:'radial'}), {kind:'radial'});
+  const ff = ffActive(cx), runFF = (c, p) => { try { CMD.run(c, p); } catch (e){} refreshOptions(); if (window.UI) UI.draw(); };
+  btn(box, Lang.t('ui.gradKindFree'), 'ui.gradKindFree', !!ff, () => runFF('gradient.freeform.apply', {}), {kind:'freeform'});
+  if (ff){                                                // 任意形状：点／线模式（AI 渐变面板「绘制：点／线」）
+    sepEl(box);
+    btn(box, Lang.t('ui.gradFfPoints'), 'ui.gradFfPoints', ff.fill.mode !== 'lines', () => runFF('gradient.freeform.setMode', {mode:'points'}), {ffmode:'points'});
+    btn(box, Lang.t('ui.gradFfLines'), 'ui.gradFfLines', ff.fill.mode === 'lines', () => runFF('gradient.freeform.setMode', {mode:'lines'}), {ffmode:'lines'});
+    const h = document.createElement('span'); h.style.cssText = 'color:#7a8290;margin-left:8px'; h.textContent = Lang.t('ui.gradFfHint'); box.appendChild(h);
+    return;
+  }
   btn(box, '⇄', 'ui.gradReverseBtn', false, () => edit({reverse:true}), {opt:'reverseBtn'});
   sepEl(box);
   const an = document.createElement('input'); an.type = 'number'; an.step = 1; an.style.width = '60px'; an.dataset.opt = 'angle';
@@ -1424,6 +1698,6 @@ Tools.reg({
 });
 
 /* 给测试／agent 看内部 */
-window.GradientTool = {RO, GV, GP, VG, gradT, sampleStops, ditherNoise, snap45, resolvePreset, insertStop, removeStop, moveStop, duplicateStop, midpointPos, midpointFromPos, fitGeom, annotatorOf:() => annotatorOf(vcx()), selectedStop:() => selectedStop(vcx()), Ann};
+window.GradientTool = {RO, GV, GP, VG, FF, gradT, sampleStops, ditherNoise, snap45, resolvePreset, insertStop, removeStop, moveStop, duplicateStop, midpointPos, midpointFromPos, fitGeom, annotatorOf:() => annotatorOf(vcx()), selectedStop:() => selectedStop(vcx()), Ann};
 
 })();

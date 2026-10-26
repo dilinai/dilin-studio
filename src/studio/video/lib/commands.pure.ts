@@ -16,7 +16,9 @@ import {
   pruneLanes, removeClips, replaceMedia, setClipVolume, setLaneFlag, snapFrame, splitAtPlayhead, splitClip, srcAt, timeOfSrc, timelineEnd, toggleClipFlag, trimClip,
   type Lane, type LaneKind, type MediaKindLike, type TextAnimSlot, type TlClip, type Tracks,
 } from './timeline.pure'
-import { parseProject, type ProjectMedia, type ProjectMediaKind, type VeditProject } from './project.pure'
+import { VEDIT_PROGRAMS_EMBED_MAX, parseProject, type ProjectMedia, type ProjectMediaKind, type ProjectProgram, type VeditProject } from './project.pure'
+import { l10n, newProgramClip, optValue, paramValue, parseManifest, type ProgramBundle, type ProgramManifest, type ProgramParamValue } from './program.pure' // 程序片段
+import { BUILTIN_PROGRAMS, builtinProgram } from './programs.data'
 import { PROJECT_ID_RE } from './id.pure'
 import { TEXT_DEFAULT_SECONDS, TEXT_SIZE_MAX, TEXT_SIZE_MIN, fancyById, newTextClip } from './text.pure'
 import { BG_SHAPES, LETTER_SPACING_MAX, LETTER_SPACING_MIN, LINE_SPACING_MAX, SCALE_MAX, SCALE_MIN, SHADOW_BLUR_MAX, SHADOW_DIST_MAX, STROKE_W_MAX, STROKE_W_MIN, TEXT_ALIGNS, TEXT_CONTENT_MAX, TEXT_FONTS, applyTextPatch, patchTexts, type TextPatch } from './text-style.pure'
@@ -35,7 +37,8 @@ import { PIN_KEYS, PIN_LIM, ROT3D_D_MAX, ROT3D_D_MIN, ROT3D_DEFAULT, ROT3D_LIM, 
 import { ratioOf } from './ratio.pure'
 import { bindFollow, followChoices } from './motion-track.pure' // 运动跟踪
 import { ADJ_KEYS, BLEND_MODES, DB_MAX, DB_MIN, FADE_MAX, MASK_SHAPES, POS_LIM, SCALE_MAX as LOOK_SCALE_MAX, SCALE_MIN as LOOK_SCALE_MIN, VISUAL_ANIM_LIB, adjRange, lookOf, patchClips, type AdjKey, type LookPatch } from './clip-look.pure'
-import { MASKS_MAX, MASK_OPS, MATTE_MODES, STRIPE_COUNT_MAX, STRIPE_EASES, parseMatte } from './mask-matte.pure' // 条纹／多蒙版／轨道遮罩
+import { MASKS_MAX, MASK_OPS, MATTE_KINDS, MATTE_MODES, STRIPE_COUNT_MAX, STRIPE_EASES, laneAbove, matteFromKind, matteKindOf, parseMatte, type ClipMatte, type MatteKind } from './mask-matte.pure' // 条纹／多蒙版／轨道遮罩
+import { COMPS_MAX, COMP_NAME_MAX, compDuration, compRefs, compWouldCycle, precompose, type Comps, type VeditComp } from './comp.pure' // 巢状合成
 import { EASE_PRESETS, KF_ADJ_KEYS, KF_MASK_KEYS, kfDrop, kfIndexAt, kfPut, normalizeKf, type Kf, type KfEase, type KfProp, type KfTracks } from './keyframe.pure'
 import { canGroup, expandGroups, groupClips, pruneGroups, ungroupClips } from './group.pure'
 import { addMarker, markersOf, removeMarker, MARKER_CAP } from './toolbar.pure'
@@ -44,6 +47,8 @@ import { isFontId } from '../../shared/fonts/catalog'
 import { WEB_SHOT_THEMES, WEB_SHOT_WIDTH_DEFAULT, WEB_SHOT_WIDTH_MAX, WEB_SHOT_WIDTH_MIN, WEB_SHOT_MAX_CSS_HEIGHT, parseWebShotOpts, type WebShotOpts } from './web-shot.pure' // 网页截图
 import { SFX_LIB, sfxById } from './sfx-lib.pure' // 内建音效 sfx.add
 import { TTS_EMOTIONS, TTS_MAX_CHARS, TTS_VOICES, parseTtsReq, type TtsReq } from './tts-req.pure' // 朗读配音 media.tts（与网页朗读同一份验值）
+import { CAM_PROPS, CONE_MAX, CONE_MIN, D3_PROPS, FOV_MAX, FOV_MIN, INTENSITY_MAX, LIGHT_KINDS, LT_PROPS, NULL_PROPS, POS3_LIM, RIG_DEFAULT_SECONDS, ROT3_LIM, canChild, canParent, can3d, exprPropsFor, newCameraClip, newLightClip, newNullClip, parentLoops, patchRigClip, propValue, type LightKind, type RigPatch } from './rig.pure' // 空物件／父子连结／3D 摄影机灯光
+import { compileExpr, exprStatus, setExprScene } from './expr.pure' // 表达式
 
 /** 一批最多几步（同画板 drawboard_batch） */
 export const VEDIT_STEPS_MAX = 80
@@ -57,7 +62,8 @@ const UNKNOWN_SRC_SECONDS = 1e7
 const EPS = 1e-6
 
 // ── 型别 ──
-export type ParamType = 'number' | 'integer' | 'string' | 'boolean' | 'clip' | 'clips' | 'lane' | 'media' | 'object' | 'strings' | 'array'
+/** source＝素材或合成编号（clip.add） */
+export type ParamType = 'number' | 'integer' | 'string' | 'boolean' | 'clip' | 'clips' | 'lane' | 'media' | 'comp' | 'source' | 'program' | 'object' | 'strings' | 'array'
 /** 参数说明（listCommands 原样给角色看）：enum＝只收这几个字；min／max＝范围（含两端）；nullable＝可给 null（拿掉／回默认） */
 export type ParamSpec = { name: string; type: ParamType; required?: boolean; enum?: readonly string[]; min?: number; max?: number; nullable?: boolean; note: string }
 export type CommandInfo = { id: string; description: string; params: ParamSpec[]; requires?: string; readOnly?: boolean }
@@ -74,7 +80,8 @@ export type SfxDone = { driveId: string; name: string }
 export type RunOpts = { newId?: () => string; webShots?: Readonly<Record<number, WebShotDone>>; tts?: Readonly<Record<number, TtsDone>>; sfx?: Readonly<Record<number, SfxDone>> }
 
 type Args = Record<string, unknown>
-type Ctx = { tracks: Tracks; ratio: RatioSel; media: ProjectMedia[]; newId: () => string; step: number; webShots?: Readonly<Record<number, WebShotDone>>; tts?: Readonly<Record<number, TtsDone>>; sfx?: Readonly<Record<number, SfxDone>> }
+/** tracks＝现在改的那一层（主时间轴或 comp.enter 进的那份合成）；root＝主时间轴（进合成时先存这里）；level＝在哪份合成里（null＝主时间轴）；comps＝全部子合成 */
+type Ctx = { tracks: Tracks; root: Tracks; level: string | null; comps: Comps; ratio: RatioSel; media: ProjectMedia[]; programs: Record<string, ProjectProgram>; newId: () => string; step: number; webShots?: Readonly<Record<number, WebShotDone>>; tts?: Readonly<Record<number, TtsDone>>; sfx?: Readonly<Record<number, SfxDone>> }
 type Out = { id?: string; ids?: string[]; lane?: string; note?: string; data?: unknown }
 type Def = CommandInfo & { check?: (c: Ctx, a: Args) => string | null; run: (c: Ctx, a: Args) => Out }
 
@@ -93,6 +100,35 @@ const endOf = (c: TlClip) => c.start + c.length
 const mediaOf = (c: Ctx, id: string) => c.media.find((m) => m.id === id)
 const kindOf = (c: Ctx) => (mid: string): MediaKindLike | undefined => mediaOf(c, mid)?.kind
 const isMediaClip = (x: TlClip) => !!x.mediaId && !x.text && !x.sticker && !x.filter && !x.program
+/** 画面片段（影片／图片素材段或合成段）：外观、动画、四角透视、轨道遮罩都收 */
+const isPicClip = (x: TlClip) => isMediaClip(x) || !!x.comp
+/** 现在这一层存回去（主时间轴 ⇒ root；合成 ⇒ comps） */
+function stashLevel(c: Ctx): void {
+  if (c.level) c.comps = { ...c.comps, [c.level]: { ...c.comps[c.level], tracks: c.tracks } }
+  else c.root = c.tracks
+}
+/** 换到另一层改（null＝主时间轴） */
+function enterLevel(c: Ctx, id: string | null): void {
+  stashLevel(c)
+  c.level = id
+  c.tracks = id ? c.comps[id].tracks : c.root
+}
+const compOf = (c: Ctx, id: string): VeditComp => c.comps[id] ?? fail(`composition "${id}" not found — list them with comp.list.`)
+/** 合成段在哪几段（全工程：主时间轴与每份合成）用到这份合成 */
+function compUsers(c: Ctx, id: string): string[] {
+  stashLevel(c)
+  const out: string[] = []
+  for (const tr of [c.root, ...Object.values(c.comps).map((x) => x.tracks)]) for (const l of tr) for (const x of l.clips) if (x.comp === id) out.push(x.id)
+  return out
+}
+/** 命令参数的比例（project.setRatio／comp.create 共用） */
+const ratioArg = (a: Args): RatioSel | undefined => { const r = str(a, 'ratio'); return r === undefined ? undefined : r === 'fit' ? { kind: 'fit' } : r === 'custom' ? { kind: 'custom', w: num(a, 'width')!, h: num(a, 'height')! } : { kind: 'preset', key: r as RatioPresetKey } }
+const ratioArgBad = (a: Args): string | null => {
+  const custom = str(a, 'ratio') === 'custom', has = a.width !== undefined || a.height !== undefined
+  if (custom && (a.width === undefined || a.height === undefined)) return 'ratio "custom" needs both width and height (pixels).'
+  if (!custom && has) return 'width/height only go with ratio "custom".'
+  return null
+}
 /** 片段是哪一种（白话错误里用） */
 function clipKind(c: Ctx, x: TlClip): string {
   if (x.text) return 'text'
@@ -102,7 +138,9 @@ function clipKind(c: Ctx, x: TlClip): string {
   if (x.shape) return 'shape'
   if (x.solid) return 'solid colour'
   if (x.bgfx) return `animated background (${x.bgfx.kind})`
+  if (x.rig) return x.rig.kind === 'null' ? 'null object' : x.rig.kind === 'camera' ? 'camera' : `light (${x.rig.light})`
   if (x.adjust) return 'adjustment layer'
+  if (x.comp) return `composition clip ("${c.comps[x.comp]?.name ?? x.comp}")`
   return mediaOf(c, x.mediaId)?.kind ?? 'media'
 }
 const laneOf = (c: Ctx, id: string): Lane => c.tracks.find((l) => l.id === id) ?? fail(`lane "${id}" not found — list lanes with timeline.list.`)
@@ -185,6 +223,9 @@ const P = {
   y: (): ParamSpec => ({ name: 'y', type: 'number', min: 0, max: 1, note: 'Centre y as a fraction of the frame height (0 top … 1 bottom; default 0.5)' }),
 }
 const PRESET_KEYS = Object.keys(RATIO_PRESETS) as RatioPresetKey[]
+/** 合成的比例参数（comp.create／comp.update） */
+const COMP_RATIO_PARAMS: ParamSpec[] = [{ name: 'ratio', type: 'string', enum: ['fit', ...PRESET_KEYS, 'custom'], note: '"fit" = same frame shape as the timeline that uses it (default); a preset; or "custom" with width/height' },
+      { name: 'width', type: 'integer', min: CUSTOM_MIN, max: CUSTOM_MAX, note: 'Pixels (ratio "custom" only)' }, { name: 'height', type: 'integer', min: CUSTOM_MIN, max: CUSTOM_MAX, note: 'Pixels (ratio "custom" only)' }]
 const TEXT_STYLE_PARAMS: ParamSpec[] = [
   { name: 'content', type: 'string', note: `New text (\\n for line breaks; max ${TEXT_CONTENT_MAX} chars; empty is not allowed — delete the clip instead)` },
   { name: 'fancy', type: 'string', nullable: true, note: 'Fancy text style id (catalog.list kind "fancy"); null = plain white text' },
@@ -310,10 +351,12 @@ function lookPatchOf(a: Args): LookPatch {
     else {
       const o = a.matte as Record<string, unknown>
       if (!o || typeof o !== 'object' || Array.isArray(o)) fail('matte must be an object or null.')
-      onlyKeys(o, 'matte', ['lane', 'mode', 'invert'])
+      onlyKeys(o, 'matte', ['lane', 'clip', 'mode', 'invert', 'show'])
       if (o.mode !== undefined && !(MATTE_MODES as readonly unknown[]).includes(o.mode)) fail(`matte.mode must be one of ${MATTE_MODES.join(', ')}.`)
       if (o.lane !== undefined && typeof o.lane !== 'string') fail('matte.lane must be a lane id string.')
-      if (o.invert !== undefined && typeof o.invert !== 'boolean') fail('matte.invert must be true or false.')
+      if (o.clip !== undefined && (typeof o.clip !== 'string' || !PROJECT_ID_RE.test(o.clip))) fail('matte.clip must be a clip id string.')
+      if (o.clip !== undefined && o.lane !== undefined) fail('give matte.clip or matte.lane, not both.')
+      for (const k of ['invert', 'show']) if (o[k] !== undefined && typeof o[k] !== 'boolean') fail(`matte.${k} must be true or false.`)
       p.matte = parseMatte(o)!
     }
   }
@@ -334,21 +377,28 @@ const KF_INFO: Record<string, [number, number, string]> = {
   ...Object.fromEntries(KF_MASK_KEYS.map((k) => [`mask.${k}`, [...MASK_RANGE[k], `mask ${k} (same units as clip.setLook mask)`]])),
   ...Object.fromEntries(KF_ADJ_KEYS.map((k) => [`adj.${k}`, [...adjRange(k), `colour adjustment ${k}`]])),
   ...Object.fromEntries(PIN_KEYS.map((k) => [`pin.${k}`, [-PIN_LIM, PIN_LIM, `corner pin ${k} (same units as clip.setCornerPin)`]])),
+  'd3.z': [-POS3_LIM, POS3_LIM, '3D depth in frame heights (+ = farther from the camera)'], 'd3.rx': [-ROT3_LIM, ROT3_LIM, '3D tilt around x in degrees (+ = bottom edge goes away)'],
+  'd3.ry': [-ROT3_LIM, ROT3_LIM, '3D turn around y in degrees (+ = right edge goes away)'], 'd3.rz': [-ROT3_LIM, ROT3_LIM, '3D roll around z in degrees, clockwise'],
+  ...Object.fromEntries((['x', 'y', 'z', 'tx', 'ty', 'tz'] as const).map((k) => [`cam.${k}`, [-POS3_LIM, POS3_LIM, `camera ${k.length > 1 ? `target ${k[1]}` : `position ${k}`} in frame heights (origin = frame centre, y up, z + = into the picture)`]])),
+  'cam.fov': [FOV_MIN, FOV_MAX, 'camera vertical field of view in degrees'], 'lt.int': [0, INTENSITY_MAX, 'light intensity (1 = 100%)'],
+  ...Object.fromEntries((['x', 'y', 'z'] as const).map((k) => [`lt.${k}`, [-POS3_LIM, POS3_LIM, `light position ${k} in frame heights (same axes as the camera)`]])),
 }
 /** 这段能打哪几项关键帧（同页面关键帧面板·读档 parseProject 留得住的那几项）；不能 ⇒ 白话原因 */
 function kfPropsFor(c: Ctx, f: { clip: TlClip; lane: Lane }): KfProp[] | string {
   const x = f.clip
   const pinP: KfProp[] = x.look?.pin ? PIN_KEYS.map((k) => `pin.${k}` as KfProp) : [] // 四角透视开着才收
-  if (x.sticker && pinP.length) return pinP
+  const d3P: KfProp[] = x.d3 ? [...D3_PROPS] : [] // 开了 3D 才收 d3.*
+  if (x.rig) return x.rig.kind === 'null' ? [...NULL_PROPS, ...d3P] : x.rig.kind === 'camera' ? [...CAM_PROPS] : [...LT_PROPS] // 空物件／摄影机／灯光
+  if (x.sticker && (pinP.length || d3P.length)) return [...pinP, ...d3P]
   if (x.sticker) return 'stickers have no keyframes in the editor yet — move or resize them with sticker.update.'
   if (x.program) return 'program clips have no keyframes.'
-  if (x.text) return ['tx', 'ty', 'ts', 'trot', 'top', ...pinP]
+  if (x.text) return ['tx', 'ty', 'ts', 'trot', 'top', ...pinP, ...d3P]
   if (x.filter) return ['flt']
   if (x.adjust) return 'adjustment layers have no keyframes through commands yet — set their colour with clip.setLook adjust.'
-  if (x.shape || x.solid || x.bgfx) return ['sx', 'sy', 'x', 'y', 'rot', 'opacity'] // 形状／纯色：位置大小旋转不透明度（同 lookOf）
+  if (x.shape || x.solid || x.bgfx) return ['sx', 'sy', 'x', 'y', 'rot', 'opacity', ...d3P] // 形状／纯色：位置大小旋转不透明度（同 lookOf）
   if (x.freeze) return 'a freeze-frame clip stands still on one frame — keyframes have nothing to follow.'
   if (f.lane.kind === 'audio') return ['vol']
-  const pic: KfProp[] = ['sx', 'sy', 'x', 'y', 'rot', 'opacity', ...(x.look?.mask ? KF_MASK_KEYS.map((k) => `mask.${k}` as KfProp) : []), ...KF_ADJ_KEYS.map((k) => `adj.${k}` as KfProp), ...pinP]
+  const pic: KfProp[] = ['sx', 'sy', 'x', 'y', 'rot', 'opacity', ...(x.look?.mask ? KF_MASK_KEYS.map((k) => `mask.${k}` as KfProp) : []), ...KF_ADJ_KEYS.map((k) => `adj.${k}` as KfProp), ...pinP, ...d3P]
   return mediaOf(c, x.mediaId)?.kind === 'video' ? [...pic, 'vol'] : pic
 }
 /** timeline.list 里的关键帧：每项一串 {at 时间轴秒, v, ease} */
@@ -356,6 +406,187 @@ function kfList(x: TlClip): Record<string, Array<{ at: number; v: number; ease?:
   if (!x.kf) return undefined
   const o = Object.fromEntries(Object.entries(x.kf as KfTracks).filter(([, tr]) => tr?.length).map(([p, tr]) => [p, (tr as Kf[]).map((k) => ({ at: r3(timeOfSrc(x, k.t)), v: k.v, ...(k.e ? { ease: k.e } : {}) })).sort((a, b) => a.at - b.at)]))
   return Object.keys(o).length ? o : undefined
+}
+
+// ── 摄影机／灯光（camera.add／update·light.add／update）──
+const POS3 = (k: string, what: string): ParamSpec => ({ name: k, type: 'number', min: -POS3_LIM, max: POS3_LIM, note: `${what} in frame heights (origin = frame centre, y up, z + = into the picture)` })
+const CAM_PARAMS: ParamSpec[] = [POS3('x', 'Camera position x'), POS3('y', 'Camera position y'), POS3('z', 'Camera position z (default −1.3737 = the picture plane looks exactly like 2D at fov 40)'),
+  POS3('tx', 'Point of interest x'), POS3('ty', 'Point of interest y'), POS3('tz', 'Point of interest z'),
+  { name: 'fov', type: 'number', min: FOV_MIN, max: FOV_MAX, note: 'Vertical field of view in degrees (default 40; smaller = telephoto)' },
+  { name: 'aperture', type: 'number', min: 0, max: 100, note: 'Depth of field 0..100 (0 = off): layers away from the focus distance get blurred' },
+  { name: 'focus', type: 'number', min: 0.01, max: POS3_LIM, note: 'Focus distance from the camera in frame heights (default = distance to the picture plane)' }]
+const LIGHT_PARAMS: ParamSpec[] = [{ name: 'color', type: 'string', note: 'Light colour #rrggbb (default #ffffff)' },
+  { name: 'intensity', type: 'number', min: 0, max: INTENSITY_MAX, note: 'Intensity (1 = 100%; ambient lights add evenly, others by the angle to each 3D layer)' },
+  POS3('x', 'Light position x'), POS3('y', 'Light position y'), POS3('z', 'Light position z (− = in front of the picture, towards the camera)'),
+  POS3('tx', 'Where a parallel / spot light points: x'), POS3('ty', 'Where it points: y'), POS3('tz', 'Where it points: z'),
+  { name: 'cone', type: 'number', min: CONE_MIN, max: CONE_MAX, note: 'Spot light cone angle in degrees (default 60)' },
+  { name: 'feather', type: 'number', min: 0, max: 100, note: 'Spot light soft edge 0..100 (default 50)' }]
+const pickArgs = (a: Args, keys: readonly string[]) => Object.fromEntries(keys.filter((k) => a[k] !== undefined && a[k] !== null).map((k) => [k, typeof a[k] === 'string' ? (a[k] as string).toLowerCase() : a[k]]))
+const CAM_KEYS = ['x', 'y', 'z', 'tx', 'ty', 'tz', 'fov', 'aperture', 'focus'] as const
+const LIGHT_KEYS = ['color', 'intensity', 'x', 'y', 'z', 'tx', 'ty', 'tz', 'cone', 'feather'] as const
+const colorBad = (a: Args) => (a.color !== undefined && !HEX_RE.test(str(a, 'color') ?? '') ? `color must be #rrggbb (got "${str(a, 'color')}").` : null)
+function rigCommands(): Def[] {
+  return [
+    {
+      id: 'camera.add',
+      params: [P.at(true, 'Start on the timeline (seconds)'), P.length(RIG_DEFAULT_SECONDS), ...CAM_PARAMS, P.lane(false, 'Visual lane to use; omit = the editor picks')],
+      requires: 'A chosen lane must be a visual lane and not locked.',
+      description: 'Add a camera clip (on a visual lane; draws nothing): while it is on the timeline, all 3D layers (clip.set3d) are seen through it — position, point of interest, field of view, optional depth of field. Only the camera on the topmost lane counts when several overlap. Animate it with clip.setKeyframe cam.x / cam.y / cam.z / cam.tx / cam.ty / cam.tz / cam.fov (or clip.setExpression), or parent it to a null with clip.setParent to orbit.',
+      check: (c, a) => { laneFits(c, str(a, 'lane'), 'visual', 'cameras'); return null },
+      run: (c, a) => {
+        const clip = newCameraClip(c.newId(), pickArgs(a, CAM_KEYS))
+        clip.length = snapFrame(num(a, 'length') ?? RIG_DEFAULT_SECONDS)
+        return placed(c, place(c, 'visual', clip, num(a, 'at')!, str(a, 'lane')), clip.id)
+      },
+    },
+    {
+      id: 'camera.update',
+      params: [P.clip('Camera clip id'), ...CAM_PARAMS],
+      requires: 'A camera clip; lane not locked.',
+      description: 'Change a camera: position, point of interest, field of view, depth of field (aperture 0 = off). Properties with keyframes follow their keyframes instead.',
+      check: (c, a) => { const f = editableClip(c, str(a, 'clip')!); if (f.clip.rig?.kind !== 'camera') return `clip "${f.clip.id}" is ${clipKind(c, f.clip)}, not a camera.`; return Object.keys(a).some((k) => k !== 'clip') ? null : 'give at least one property.' },
+      run: (c, a) => { const id = str(a, 'clip')!; c.tracks = patchRigClip(c.tracks, id, { rig: pickArgs(a, CAM_KEYS) as RigPatch['rig'] }); return { id, ids: [id] } },
+    },
+    {
+      id: 'light.add',
+      params: [{ name: 'kind', type: 'string', required: true, enum: LIGHT_KINDS, note: 'parallel = sun-like, from its position towards its target; point = from a point in all directions; spot = cone from its position towards its target; ambient = even light everywhere' },
+        P.at(true, 'Start on the timeline (seconds)'), P.length(RIG_DEFAULT_SECONDS), ...LIGHT_PARAMS, P.lane(false, 'Visual lane to use; omit = the editor picks')],
+      requires: 'A #rrggbb colour if given; a chosen lane must be a visual lane and not locked.',
+      description: 'Add a light clip (on a visual lane; draws nothing). While any light is on, every 3D layer is shaded by simplified Lambert lighting: ambient adds evenly; parallel / point / spot light it by the angle between the layer and the light (spot also by its cone). 2D layers are not lit. Animate with clip.setKeyframe lt.int / lt.x / lt.y / lt.z.',
+      check: (c, a) => { laneFits(c, str(a, 'lane'), 'visual', 'lights'); return colorBad(a) },
+      run: (c, a) => {
+        const clip = newLightClip(c.newId(), str(a, 'kind') as LightKind, pickArgs(a, LIGHT_KEYS))
+        clip.length = snapFrame(num(a, 'length') ?? RIG_DEFAULT_SECONDS)
+        return placed(c, place(c, 'visual', clip, num(a, 'at')!, str(a, 'lane')), clip.id)
+      },
+    },
+    {
+      id: 'light.update',
+      params: [P.clip('Light clip id'), { name: 'kind', type: 'string', enum: LIGHT_KINDS, note: 'Change the kind' }, ...LIGHT_PARAMS],
+      requires: 'A light clip; lane not locked.',
+      description: 'Change a light: kind, colour, intensity, position, target, spot cone / soft edge.',
+      check: (c, a) => { const f = editableClip(c, str(a, 'clip')!); if (f.clip.rig?.kind !== 'light') return `clip "${f.clip.id}" is ${clipKind(c, f.clip)}, not a light.`; if (!Object.keys(a).some((k) => k !== 'clip')) return 'give at least one property.'; return colorBad(a) },
+      run: (c, a) => { const id = str(a, 'clip')!; c.tracks = patchRigClip(c.tracks, id, { rig: { ...pickArgs(a, LIGHT_KEYS), ...(a.kind !== undefined ? { light: a.kind as LightKind } : {}) } as RigPatch['rig'] }); return { id, ids: [id] } },
+    },
+  ]
+}
+
+// ── 程序片段（program.define／program.add／program.update·程序动画一条条命令放·⛔ 只能整份工程重写）──
+/** 内嵌程序包的键（同 parseProject 收 programs 那把尺） */
+const PKG_ID_RE = /^u-[A-Za-z0-9-]{8,64}$/
+const PROGRAM_TEXT_MAX = 2000
+const utf8Len = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length
+/** 程序包：网站内建（b-…）或这份工程内嵌的（u-…·manifest 读得懂才算） */
+function bundleOf(c: Ctx, id: string): ProgramBundle | null {
+  const b = builtinProgram(id)
+  if (b) return b
+  const p = c.programs[id]
+  if (!p) return null
+  const m = parseManifest(p.manifest)
+  return m.ok ? { id, manifest: m.manifest, html: p.html, builtin: false } : null
+}
+const pkgOf = (c: Ctx, id: string): ProgramBundle => bundleOf(c, id) ?? fail(`program package "${id}" is neither built in nor in this project — see catalog.list {"kind":"program"}, or register your own with program.define first.`)
+/** 程序参数：只收 manifest 列的 key·型别不对报错·数字超出 min～max 夹进范围（回一句说明）·null ⇒ 拿掉（回包里默认） */
+function programParamsOf(m: ProgramManifest, raw: Record<string, unknown>): { set: Record<string, ProgramParamValue>; unset: string[]; clamped: string[] } {
+  const set: Record<string, ProgramParamValue> = {}, unset: string[] = [], clamped: string[] = []
+  const keys = m.params.map((s) => s.key)
+  for (const [k, v] of Object.entries(raw)) {
+    const s = m.params.find((x) => x.key === k)
+    if (!s) fail(`program param "${k}" is not in this package — it takes ${keys.length ? keys.join(', ') : 'no params'} (see catalog.list {"kind":"program"}).`)
+    if (v === null) { unset.push(k); continue }
+    const bad = (want: string): never => fail(`program param "${k}" must be ${want} (got ${JSON.stringify(v)?.slice(0, 80)}).`)
+    switch (s!.type) {
+      case 'number': {
+        if (typeof v !== 'number' || !Number.isFinite(v)) bad('a number')
+        const x = paramValue(s!, v) as number
+        if (x !== v) clamped.push(`${k} ${v} → ${x}`)
+        set[k] = x
+        break
+      }
+      case 'text': if (typeof v !== 'string') bad('a string'); if ((v as string).length > PROGRAM_TEXT_MAX) bad(`at most ${PROGRAM_TEXT_MAX} characters`); set[k] = v as string; break
+      case 'color': if (typeof v !== 'string' || !HEX_RE.test(v)) bad('"#rrggbb"'); set[k] = v as string; break
+      case 'bool': if (typeof v !== 'boolean') bad('true or false'); set[k] = v as boolean; break
+      case 'select': { const ok = s!.options.map(optValue); if (typeof v !== 'string' || !ok.includes(v)) bad(`one of ${ok.map((x) => `"${x}"`).join(', ')}`); set[k] = v as string; break }
+    }
+  }
+  return { set, unset, clamped }
+}
+const clampNote = (cl: string[]) => (cl.length ? `clamped to the package's range: ${cl.join(', ')}.` : undefined)
+/** catalog.list 里一个程序包：编号、英文名、内建还是工程内嵌、缺省秒数、每项参数（型别、缺省、范围、选项） */
+const programRow = (b: ProgramBundle) => ({
+  id: b.id, name: l10n(b.manifest.name, 'en'), builtin: b.builtin, version: b.manifest.version, defaultLength: b.manifest.defaultLength,
+  params: b.manifest.params.map((s) => ({ key: s.key, label: l10n(s.label, 'en'), type: s.type, default: s.default, ...(s.type === 'number' ? { ...(s.min !== undefined ? { min: s.min } : {}), ...(s.max !== undefined ? { max: s.max } : {}) } : {}), ...(s.type === 'select' ? { options: s.options.map(optValue) } : {}) })),
+})
+const PROGRAM_PARAMS_NOTE = 'Program params {key: value} from the package\'s manifest (catalog.list {"kind":"program"}): text = string, color = "#rrggbb", number (outside min..max is clamped), select = one of its options, bool; omitted = the package default'
+function programCommands(): Def[] {
+  return [
+    {
+      id: 'program.define',
+      params: [
+        { name: 'id', type: 'string', note: 'Package id "u-<8..64 letters, digits or ->" (omit = a new one); a program.add later in the same batch can use "$<this step>"' },
+        { name: 'manifest', type: 'object', required: true, note: '{name, version, defaultLength (sec), params:[{key, label?, type:"text"|"color"|"number"|"select"|"bool", default, min?, max?, step?, options?}]} — same as manifest.json of an uploaded package (engine html; alpha default true)' },
+        { name: 'html', type: 'string', required: true, note: `The whole page, assets inlined as data: URLs; it must set window.dilinProgram = {render(t, params, size)} (t = seconds since the clip start, size = {w, h}; draw only from t — no clock, no network). Embedded packages together at most ${VEDIT_PROGRAMS_EMBED_MAX / 1024 / 1024} MB` },
+        { name: 'replace', type: 'boolean', note: 'true = overwrite a package with this id that has different content (default: refuse)' },
+      ],
+      requires: 'A valid manifest; html that sets window.dilinProgram; size within the limit; an existing id with different content needs replace:true.',
+      description: 'Register a program package you wrote (manifest + html) in this project, so program.add can place it. Returns its package id. The same id with exactly the same content changes nothing. It runs in the editor\'s sandbox (no network), in preview and export alike. A package no clip uses is dropped the next time the editor saves. To put a program animation on the timeline use program.define + program.add — do not rewrite the whole project with update_video_edit.',
+      run: (c, a) => {
+        const id = (str(a, 'id') ?? `u-prog-${c.newId().replace(/[^A-Za-z0-9-]/g, '-')}`).trim()
+        if (!PKG_ID_RE.test(id)) fail(`id must look like "u-" + 8..64 letters, digits or "-" (got "${id}").`)
+        const pm = parseManifest(a.manifest)
+        if (!pm.ok) fail(`manifest is not valid: ${(pm as { err: string }).err}.`)
+        const manifest = (pm as { manifest: ProgramManifest }).manifest
+        const html = str(a, 'html')!
+        if (!/dilinProgram/.test(html)) fail('html must set window.dilinProgram = { render(t, params, size) { … } } — the editor calls it for every frame.')
+        const entry: ProjectProgram = { manifest, html }
+        const had = c.programs[id]
+        if (had && JSON.stringify(canon(had)) === JSON.stringify(canon(entry))) return { id, note: 'already in this project with the same content — nothing changed.' }
+        if (had && a.replace !== true) fail(`program package "${id}" is already in this project with different content — pass replace:true to overwrite it (clips using it will draw with the new one), or use another id.`)
+        const next = { ...c.programs, [id]: entry }
+        const bytes = utf8Len(next) - utf8Len({})
+        if (bytes > VEDIT_PROGRAMS_EMBED_MAX) fail(`embedded program packages would total ${Math.ceil(bytes / 1024)} KB, over the ${VEDIT_PROGRAMS_EMBED_MAX / 1024} KB limit — make the html smaller.`)
+        c.programs = next
+        return { id, data: programRow({ id, manifest, html, builtin: false }), ...(had ? { note: 'replaced the old content.' } : {}) }
+      },
+    },
+    {
+      id: 'program.add',
+      params: [
+        { name: 'pkg', type: 'program', required: true, note: 'Program package id: built in (catalog.list {"kind":"program"}), already in this project, or "$<step>" of a program.define in this batch' },
+        P.at(true, 'Start on the timeline (seconds)'),
+        { name: 'length', type: 'number', min: MIN_CLIP, max: TIME_MAX, note: 'Seconds on the timeline (default = the package\'s defaultLength)' },
+        { name: 'params', type: 'object', note: PROGRAM_PARAMS_NOTE },
+        P.lane(false, 'Program lane to use; omit = the editor picks (nearest program lane above main; busy there ⇒ a new program lane)'),
+      ],
+      requires: 'A known package; params from its manifest; a chosen lane must be a program lane and not locked.',
+      description: 'Add a program clip: an animated overlay drawn by a program package (HTML/canvas, transparent background) on a program lane. Use a built-in package or one registered with program.define. Change its params later with program.update; move / trim / split / delete it with clip.move, clip.trim, clip.split, clip.delete.',
+      check: (c, a) => { laneFits(c, str(a, 'lane'), 'program', 'program clips'); return null },
+      run: (c, a) => {
+        const b = pkgOf(c, str(a, 'pkg')!)
+        const pp = programParamsOf(b.manifest, (a.params as Args | undefined) ?? {})
+        const clip = newProgramClip(c.newId(), b)
+        if (num(a, 'length') !== undefined) clip.length = snapFrame(num(a, 'length')!)
+        clip.program = { ...clip.program!, params: pp.set }
+        return placed(c, place(c, 'program', clip, num(a, 'at')!, str(a, 'lane')), clip.id, clampNote(pp.clamped))
+      },
+    },
+    {
+      id: 'program.update',
+      params: [P.clip('Program clip id'), { name: 'params', type: 'object', required: true, note: `${PROGRAM_PARAMS_NOTE}; only the keys you give change; null = back to the package default` }],
+      requires: 'A program clip whose package is built in or in this project; lane not locked.',
+      description: 'Change the params of a program clip (text, colour, size, speed… whatever its package offers). Times: clip.move / clip.trim.',
+      check: (c, a) => { const f = editableClip(c, str(a, 'clip')!); if (!f.clip.program) return `clip "${f.clip.id}" is ${clipKind(c, f.clip)}, not a program clip.`; pkgOf(c, f.clip.program.pkg); return Object.keys(a.params as Args).length ? null : 'give at least one param.' },
+      run: (c, a) => {
+        const id = str(a, 'clip')!, cur = findClip(c.tracks, id)!.clip.program!
+        const b = pkgOf(c, cur.pkg)
+        const pp = programParamsOf(b.manifest, a.params as Args)
+        const params = { ...cur.params, ...pp.set }
+        for (const k of pp.unset) delete params[k]
+        swapClip(c, id, (x) => ({ ...x, program: { ...cur, version: b.manifest.version, params } }))
+        return { id, ids: [id], ...(clampNote(pp.clamped) ? { note: clampNote(pp.clamped) } : {}) }
+      },
+    },
+  ]
 }
 
 // ═══════════════════════════════ 命令表 ═══════════════════════════════
@@ -371,18 +602,21 @@ const DEFS: Def[] = [
   },
   {
     id: 'timeline.list', readOnly: true, params: [],
-    description: 'List the lanes (top to bottom) and their clips with ids, times and what each clip is — including look (position/scale/…), animations, fades, keyframes (each property: [{at timeline seconds, v, ease}]), speed, volume, effects and transitions; also the total length, frame ratio and markers.',
+    description: 'List the lanes (top to bottom) and their clips with ids, times and what each clip is — including look (position/scale/…, track matte), animations, fades, keyframes (each property: [{at timeline seconds, v, ease}]), speed, volume, effects and transitions; also the total length, frame ratio and markers. After comp.enter it lists that composition\'s lanes (data.composition says which).',
     run: (c) => ({
       data: {
-        duration: r3(timelineEnd(c.tracks)), ratio: c.ratio, markers: markersOf(c.tracks),
+        duration: r3(timelineEnd(c.tracks)), ratio: c.level ? c.comps[c.level].ratio : c.ratio, markers: markersOf(c.tracks),
+        // 在哪一层（comp.enter 进了合成 ⇒ 那份合成·列的是它的轨道）
+        ...(c.level ? { composition: { id: c.level, name: c.comps[c.level].name } } : {}), ...(Object.keys(c.comps).length ? { compositions: Object.keys(c.comps).length } : {}),
         lanes: c.tracks.map((l) => ({
           id: l.id, kind: l.kind, ...(l.id === MAIN_LANE ? { main: true } : {}), locked: l.locked, hidden: l.hidden, muted: l.muted,
           clips: l.clips.map((x) => ({
             id: x.id, what: clipKind(c, x), start: r3(x.start), length: r3(x.length),
             ...(isMediaClip(x) ? { mediaId: x.mediaId, name: mediaOf(c, x.mediaId)?.name, offset: r3(x.offset) } : {}),
+            ...(x.comp ? { comp: x.comp, name: c.comps[x.comp]?.name, offset: r3(x.offset) } : {}),
             ...(x.text ? { text: x.text.content.slice(0, 60), ...(x.text.fancy ? { fancy: x.text.fancy } : {}) } : {}),
             ...(x.shape ? { shape: x.shape } : {}), ...(x.solid ? { solid: x.solid.color } : {}), ...(x.bgfx ? { bgfx: x.bgfx } : {}),
-            ...(x.sticker ? { sticker: x.sticker.sticker } : {}), ...(x.filter ? { filter: x.filter.filter, strength: x.filter.strength } : {}),
+            ...(x.sticker ? { sticker: x.sticker.sticker } : {}), ...(x.filter ? { filter: x.filter.filter, strength: x.filter.strength } : {}), ...(x.program ? { program: x.program } : {}),
             ...(x.speed !== undefined ? { speed: x.speed } : {}), ...(x.volume !== undefined ? { volume: x.volume } : {}),
             ...(x.muted ? { muted: true } : {}), ...(x.disabled ? { disabled: true } : {}), ...(x.detached ? { detached: true } : {}),
             ...(x.fx?.length ? { fx: x.fx.map((f) => f.fx) } : {}), ...(x.transIn ? { transition: x.transIn.tr } : {}), ...(x.group ? { group: x.group } : {}),
@@ -393,6 +627,8 @@ const DEFS: Def[] = [
             ...(x.fadeIn ? { fadeIn: x.fadeIn } : {}), ...(x.fadeOut ? { fadeOut: x.fadeOut } : {}),
             ...(x.reverse ? { reverse: true } : {}), ...(x.freeze ? { freeze: true } : {}), ...(x.curve ? { speedCurve: true } : {}), ...(x.adjust ? { adjust: true } : {}),
             ...(kfList(x) ? { keyframes: kfList(x) } : {}),
+            // 空物件／摄影机／灯光·父子连结·3D·表达式
+            ...(x.rig ? { rig: x.rig } : {}), ...(x.parent ? { parent: x.parent, ...(x.parentAlpha ? { parentAlpha: true } : {}) } : {}), ...(x.d3 ? { d3: x.d3 } : {}), ...(x.expr ? { expr: x.expr } : {}),
           })),
         })),
       },
@@ -401,14 +637,15 @@ const DEFS: Def[] = [
   {
     id: 'catalog.list', readOnly: true,
     params: [
-      { name: 'kind', type: 'string', required: true, enum: ['sticker', 'filter', 'fancy', 'effect', 'transition', 'anim-in', 'anim-out', 'anim-loop', 'sfx'], note: 'Which library' },
+      { name: 'kind', type: 'string', required: true, enum: ['sticker', 'filter', 'fancy', 'effect', 'transition', 'anim-in', 'anim-out', 'anim-loop', 'sfx', 'program'], note: 'Which library' },
       { name: 'filter', type: 'string', note: 'Only ids / English names containing this text' },
     ],
-    description: 'List the ids of a built-in library (stickers, filters, fancy text styles, clip effects, transitions, text/clip animations, sound effects) with English names; sound effects also give their length in seconds (use them with sfx.add).',
-    run: (_c, a) => {
+    description: 'List the ids of a built-in library (stickers, filters, fancy text styles, clip effects, transitions, text/clip animations, sound effects, program packages) with English names; sound effects also give their length in seconds (use them with sfx.add); "program" lists the built-in program packages and the ones in this project (u-…) with defaultLength and every param (type, default, min/max, options) — use them with program.add.',
+    run: (c, a) => {
       const k = str(a, 'kind')!
       const rows: Array<{ id: string; name: string; seconds?: number }> =
-        k === 'sfx' ? SFX_LIB.map((s) => ({ id: s.id, name: s.name.en, seconds: s.seconds }))
+        k === 'program' ? [...BUILTIN_PROGRAMS, ...Object.keys(c.programs).sort().map((id) => bundleOf(c, id)).filter((b): b is ProgramBundle => !!b)].map(programRow)
+        : k === 'sfx' ? SFX_LIB.map((s) => ({ id: s.id, name: s.name.en, seconds: s.seconds }))
         : k === 'sticker' ? STICKERS.map((s) => ({ id: s.id, name: s.name.en }))
         : k === 'filter' ? FILTERS.map((s) => ({ id: s.id, name: s.name.en }))
         : k === 'fancy' ? FANCY_TEXTS.map((s) => ({ id: s.id, name: s.name.en }))
@@ -532,15 +769,27 @@ const DEFS: Def[] = [
   {
     id: 'clip.add',
     params: [
-      { name: 'media', type: 'media', required: true, note: 'Media id (from media.list / media.add, or "$<step>")' },
+      { name: 'media', type: 'source', required: true, note: 'Media id (from media.list / media.add, or "$<step>") — or a composition id (comp.list / comp.create / comp.fromClips) to place a composition clip on a visual lane (in = seconds into the composition; length defaults to the rest of it)' },
       P.at(false, 'Start on the timeline (seconds). Omit = append to the end of its lane (like double-clicking the media)'),
       P.lane(false, 'Put it on this lane (same kind: video/image → visual, audio → audio). If that time is taken a new lane is added next to it. Omit = the editor picks (main lane for video/image)'),
       { name: 'in', type: 'number', min: 0, max: TIME_MAX, note: 'Where in the source to start (seconds; video/audio only; default 0)' },
       P.length(IMAGE_DEFAULT_SECONDS),
     ],
-    requires: 'The media is in the project; the chosen lane fits and is not locked; for video/audio, in + length stays inside the source.',
-    description: 'Place a video, image or audio from the project media on the timeline (like dragging it from the media panel). Length defaults to the whole source (images 3 s).',
+    requires: 'The media is in the project (or the composition exists and does not contain the timeline you are adding to); the chosen lane fits and is not locked; for video/audio, in + length stays inside the source.',
+    description: 'Place a video, image or audio from the project media on the timeline (like dragging it from the media panel), or a composition (comp) as a composition clip on a visual lane. Length defaults to the whole source (images 3 s).',
     check: (c, a) => {
+      if (!mediaOf(c, str(a, 'media')!)) {
+        const id = str(a, 'media')!
+        const comp = compOf(c, id)
+        if (id === c.level || compWouldCycle(c.comps, c.level, id)) return `composition "${id}" can't go inside ${c.level ? `composition "${c.level}"` : 'itself'} — it would contain itself.`
+        laneFits(c, str(a, 'lane'), 'visual', 'composition clips')
+        const d = compDuration(comp), inP = num(a, 'in') ?? 0
+        if (!(d > 0)) return `composition "${id}" is empty (length 0) — add clips to it first (comp.enter) or give it a length with comp.update.`
+        if (inP >= d - MIN_CLIP + EPS) return `in (${inP}) is past the end of composition "${comp.name}" (${r3(d)} s).`
+        const len = num(a, 'length')
+        if (len !== undefined && inP + snapFrame(len) > d + EPS) return `in + length (${r3(inP + snapFrame(len))} s) runs past the end of composition "${comp.name}" (${r3(d)} s).`
+        return null
+      }
       const m = mediaOf(c, str(a, 'media')!)!
       laneFits(c, str(a, 'lane'), laneKindFor(m.kind), `${m.kind} clips`)
       if (m.kind === 'image' && num(a, 'in')) return '"in" only applies to video/audio — leave it out for images.'
@@ -554,6 +803,16 @@ const DEFS: Def[] = [
       return null
     },
     run: (c, a) => {
+      if (!mediaOf(c, str(a, 'media')!)) {
+        const id = str(a, 'media')!, d = compDuration(c.comps[id])
+        const inP = num(a, 'in') ?? 0
+        const length = num(a, 'length') !== undefined ? snapFrame(num(a, 'length')!) : snapFrame(d - inP)
+        if (length < MIN_CLIP - EPS) fail(`length must be at least one frame (${r3(MIN_CLIP)} s).`)
+        const clip: TlClip = { id: c.newId(), mediaId: '', comp: id, start: 0, length, offset: inP }
+        const laneId = str(a, 'lane'), at = num(a, 'at')
+        if (at === undefined && !laneId) return placed(c, appendMedia(c.tracks, 'visual', clip, c.newId()), clip.id)
+        return placed(c, place(c, 'visual', clip, at ?? Math.max(0, ...laneOf(c, laneId!).clips.map(endOf)), laneId), clip.id)
+      }
       const m = mediaOf(c, str(a, 'media')!)!
       const kind = laneKindFor(m.kind)
       const inP = m.kind === 'image' ? 0 : num(a, 'in') ?? 0
@@ -636,7 +895,8 @@ const DEFS: Def[] = [
       const id = str(a, 'clip')!
       const f = findClip(c.tracks, id)!
       const m = isMediaClip(f.clip) ? mediaOf(c, f.clip.mediaId) : undefined
-      const srcDur = !m || m.kind === 'image' ? Infinity : m.duration > 0 ? m.duration : UNKNOWN_SRC_SECONDS
+      const cp = f.clip.comp ? c.comps[f.clip.comp] : undefined // 合成段：素材尾＝合成长度
+      const srcDur = cp ? compDuration(cp) : !m || m.kind === 'image' ? Infinity : m.duration > 0 ? m.duration : UNKNOWN_SRC_SECONDS
       const want = snapFrame(num(a, 'at')!)
       c.tracks = trimClip(c.tracks, id, str(a, 'side') === 'start' ? 'l' : 'r', want, srcDur)
       const g = findClip(c.tracks, id)!.clip
@@ -677,8 +937,8 @@ const DEFS: Def[] = [
     description: 'Change the speed of a video/audio clip. Its timeline length follows; clips right behind it are pushed so nothing overlaps. Replaces a curve speed.',
     check: (c, a) => {
       const f = editableClip(c, str(a, 'clip')!)
-      const k = isMediaClip(f.clip) ? mediaOf(c, f.clip.mediaId)?.kind : undefined
-      if (k !== 'video' && k !== 'audio') return `clip "${f.clip.id}" is ${clipKind(c, f.clip)} — only video/audio clips have a speed.`
+      const k = f.clip.comp ? 'video' : isMediaClip(f.clip) ? mediaOf(c, f.clip.mediaId)?.kind : undefined
+      if (k !== 'video' && k !== 'audio') return `clip "${f.clip.id}" is ${clipKind(c, f.clip)} — only video/audio clips have a speed (composition clips too).`
       if (f.clip.freeze) return `clip "${f.clip.id}" is a freeze frame — it has no speed.`
       return null
     },
@@ -746,8 +1006,8 @@ const DEFS: Def[] = [
     check: (c, a) => {
       const f = editableClip(c, str(a, 'clip')!)
       //（第 4 条）：贴纸也收·款式同画面片段
-      const okSticker = f.lane.kind === 'sticker' && !!f.clip.sticker
-      if (!okSticker && (f.lane.kind !== 'visual' || !isMediaClip(f.clip))) return `clip animations are for video/image clips on visual lanes and for stickers ("${f.clip.id}" is ${clipKind(c, f.clip)}; text clips use text.setAnim).`
+      const okSticker = (f.lane.kind === 'sticker' && !!f.clip.sticker) || (f.lane.kind === 'visual' && f.clip.rig?.kind === 'null') // 空物件也收（父层的动画带着子层走）
+      if (!okSticker && (f.lane.kind !== 'visual' || !isPicClip(f.clip))) return `clip animations are for video/image clips on visual lanes and for stickers ("${f.clip.id}" is ${clipKind(c, f.clip)}; text clips use text.setAnim).`
       const slot = str(a, 'slot') as TextAnimSlot, an = a.anim
       if (an !== null && !VISUAL_ANIM_LIB[slot].some((d) => d.id === an)) return `unknown ${slot} animation "${String(an)}" for clips — see catalog.list {"kind":"anim-${slot}"} (typewriter ones are text-only).`
       return null
@@ -781,7 +1041,7 @@ const DEFS: Def[] = [
       { name: 'mask', type: 'object', nullable: true, note: `Mask {shape: ${MASK_SHAPES.join('|')}, x?, y? (−${POS_LIM}..${POS_LIM}), w?, h? (0.02..4, frame fractions), rot?, feather? 0..100, radius? 0..100, invert?; stripes only: count? 1..${STRIPE_COUNT_MAX}, gap? 0..0.95 (fraction of each band left empty), progress? 0..1 (0 = all closed, 1 = all open; keyframe it with mask.progress for a blinds reveal), stagger? 0..1 (0 = all bands together, 1 = one after another), ease? ${STRIPE_EASES.join('|')}; angle = rot}; edits the FIRST mask; fields left out keep the current mask (or defaults); null = remove the first mask` },
       { name: 'masks', type: 'array', nullable: true, note: `Replace the whole mask list (up to ${MASKS_MAX}, each like mask with shape required); null = remove all masks. Keyframes (mask.*) apply to the first one` },
       { name: 'maskOp', type: 'string', enum: MASK_OPS, note: 'How several masks combine: and = intersection (default, visible only where every mask keeps it), or = union' },
-      { name: 'matte', type: 'object', nullable: true, note: 'Track matte {lane?: text/sticker lane id (default: nearest text/sticker lane above), mode: alpha|luma, invert?}: this clip shows only through that lane\'s shape at the same moment; the matte lane itself is not drawn while used; null = remove' },
+      { name: 'matte', type: 'object', nullable: true, note: 'Track matte {clip?: id of a clip on another upper lane, lane?: text/sticker/visual lane id (default: nearest text/sticker lane above), mode: alpha|luma, invert?, show?}: this clip shows only through that layer at the same moment; the matte layer itself is not drawn while used (unless show); null = remove. clip.setMatte does the same with checks' },
       { name: 'adjust', type: 'object', note: `Colour adjustments merged in, e.g. {"bright": 20, "sat": -10}: ${ADJ_KEYS.join(', ')} (−100..100; sharpen/clarity/grain/fade 0..100; 0 = off)` },
       { name: 'glow', type: 'object', nullable: true, note: 'Outer glow {color:"#rrggbb", radius 1..100, strength 1..100}; null = off' },
       { name: 'border', type: 'object', nullable: true, note: 'Border {color:"#rrggbb", width 1..100} drawn on the inner edge of the visible picture (follows crop and rounded corners); null = off' },
@@ -796,8 +1056,8 @@ const DEFS: Def[] = [
       for (const id of ids(a, 'clips')) {
         const f = editableClip(c, id)
         if (f.clip.adjust) { if (given.some((k) => k !== 'adjust')) return `clip "${id}" is an adjustment layer — only "adjust" applies to it.`; continue }
-        if (f.lane.kind === 'visual' && (f.clip.shape || f.clip.solid || f.clip.bgfx)) { const bad = given.filter((k) => !['x', 'y', 'scale', 'sx', 'sy', 'rot', 'opacity'].includes(k)); if (bad.length) return `clip "${id}" is ${clipKind(c, f.clip)} — only x, y, scale, sx, sy, rot, opacity apply (not ${bad.join(', ')}).`; continue }
-        if (f.lane.kind !== 'visual' || !isMediaClip(f.clip)) return `clip "${id}" is ${clipKind(c, f.clip)}; clip.setLook is for video/image clips on visual lanes (text uses text.update, stickers sticker.update).`
+        if (f.lane.kind === 'visual' && (f.clip.shape || f.clip.solid || f.clip.bgfx || f.clip.rig?.kind === 'null')) { const bad = given.filter((k) => !['x', 'y', 'scale', 'sx', 'sy', 'rot', 'opacity'].includes(k)); if (bad.length) return `clip "${id}" is ${clipKind(c, f.clip)} — only x, y, scale, sx, sy, rot, opacity apply (not ${bad.join(', ')}).`; continue }
+        if (f.lane.kind !== 'visual' || !isPicClip(f.clip)) return `clip "${id}" is ${clipKind(c, f.clip)}; clip.setLook is for video/image clips (and composition clips) on visual lanes (text uses text.update, stickers sticker.update).`
       }
       lookPatchOf(a)
       return null
@@ -816,6 +1076,57 @@ const DEFS: Def[] = [
     },
   },
   {
+    // 轨道遮罩（AE Track Matte）：这段只从遮罩那层同一刻的形状／亮度里露出来·四种＝alpha／alphaInv／luma／lumaInv·遮罩那层本身缺省不画
+    id: 'clip.setMatte',
+    params: [P.clips(),
+      { name: 'mode', type: 'string', enum: MATTE_KINDS, note: 'alpha = show through the matte\'s shape; alphaInv = cut the shape out; luma = show through its brightness; lumaInv = through its darkness (default alpha)' },
+      { name: 'matte', type: 'clip', note: 'The clip to use as the matte (on another upper lane of the same timeline: video, image, shape, composition, text or sticker). Give matte, lane or above' },
+      { name: 'lane', type: 'lane', note: 'Use whatever is on this lane at each moment (text, sticker or visual lane)' },
+      { name: 'above', type: 'boolean', note: 'true = use the lane right above the clip\'s lane (like After Effects)' },
+      { name: 'show', type: 'boolean', note: 'true = still draw the matte layer itself (default false: hidden while used)' },
+      { name: 'remove', type: 'boolean', note: 'true = take the track matte off' },
+    ],
+    requires: 'Video/image/composition clips on visual lanes, lanes not locked; the matte is on a different upper lane and is not itself matted by these clips.',
+    description: 'Set a track matte on clips: each clip only shows where the matte layer is (alpha), is not (alphaInv), is bright (luma) or dark (lumaInv) at the same moment. The matte layer is hidden while it is used (show:true keeps it). Give exactly one of matte (clip id), lane, above:true — or none for the nearest text/sticker lane above. remove:true takes it off.',
+    check: (c, a) => {
+      const srcs = ['matte', 'lane', 'above'].filter((k) => a[k] !== undefined && a[k] !== false)
+      if (a.remove === true) { if (srcs.length || a.mode !== undefined || a.show !== undefined) return 'remove:true takes no other params.' }
+      else if (srcs.length > 1) return 'give only one of matte, lane, above.'
+      for (const id of ids(a, 'clips')) {
+        const f = editableClip(c, id)
+        if (f.lane.kind !== 'visual' || !isPicClip(f.clip) || f.clip.adjust) return `clip "${id}" is ${clipKind(c, f.clip)}; track mattes are for video/image/composition clips on visual lanes.`
+        if (a.remove === true) continue
+        const src = a.matte !== undefined ? findClip(c.tracks, str(a, 'matte')!)!.lane : a.lane !== undefined ? laneOf(c, str(a, 'lane')!) : a.above === true ? (laneAbove(c.tracks, f.lane.id) ? laneOf(c, laneAbove(c.tracks, f.lane.id)!) : null) : null
+        if (a.above === true && !src) return `there is no text, sticker or visual lane right above lane "${f.lane.id}" — add one, or name the matte clip with matte.`
+        if (src) {
+          if (src.id === f.lane.id) return `the matte must be on a different lane than clip "${id}".`
+          if (src.kind !== 'visual' && src.kind !== 'text' && src.kind !== 'sticker') return `lane "${src.id}" is a ${src.kind} lane — mattes come from visual, text or sticker lanes.`
+          const mc = a.matte !== undefined ? findClip(c.tracks, str(a, 'matte')!)!.clip : null
+          const back = (mc ? [mc] : src.clips).some((x) => { const m = x.look?.matte; return !!m && (m.clip ? f.lane.clips.some((y) => y.id === m.clip) : m.lane === f.lane.id) })
+          if (back) return `the matte layer itself uses lane "${f.lane.id}" as its matte — two layers can't matte each other.`
+        }
+      }
+      return null
+    },
+    run: (c, a) => {
+      const list = ids(a, 'clips')
+      for (const id of list) {
+        const f = findClip(c.tracks, id)!
+        let matte: ClipMatte | null = null
+        if (a.remove !== true) {
+          const kindArg = (str(a, 'mode') as MatteKind | undefined) ?? (f.clip.look?.matte ? matteKindOf(f.clip.look.matte) : 'alpha')
+          matte = { ...matteFromKind(kindArg) } as ClipMatte
+          if (a.matte !== undefined) matte.clip = str(a, 'matte')
+          else if (a.lane !== undefined) matte.lane = str(a, 'lane')
+          else if (a.above === true) matte.lane = laneAbove(c.tracks, f.lane.id)!
+          if (a.show === true) matte.show = true
+        }
+        c.tracks = patchClips(c.tracks, [id], { look: { matte } }, () => false)
+      }
+      return { id: list[0], ids: list }
+    },
+  },
+  {
     id: 'clip.setCornerPin',
     params: [P.clips(),
       { name: 'pin', type: 'object', nullable: true, required: true, note: `Corner pin {x0?,y0?,x1?,y1?,x2?,y2?,x3?,y3?}: offset of each frame corner (0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left) in frame widths (x) / heights (y, + = down), −${PIN_LIM}..${PIN_LIM}; fields left out keep their value (0 when turning it on); {} = on with no warp; null = off. Corners with keyframes (pin.x0..pin.y3, see clip.setKeyframe) follow the keyframes.` }],
@@ -830,7 +1141,7 @@ const DEFS: Def[] = [
       }
       for (const id of ids(a, 'clips')) {
         const f = editableClip(c, id)
-        const ok = (f.lane.kind === 'visual' && isMediaClip(f.clip) && !f.clip.adjust) || (f.lane.kind === 'text' && !!f.clip.text) || (f.lane.kind === 'sticker' && !!f.clip.sticker)
+        const ok = (f.lane.kind === 'visual' && isPicClip(f.clip) && !f.clip.adjust) || (f.lane.kind === 'text' && !!f.clip.text) || (f.lane.kind === 'sticker' && !!f.clip.sticker)
         if (!ok) return `clip "${id}" is ${clipKind(c, f.clip)}; clip.setCornerPin is for video/image, text and sticker clips.`
       }
       return null
@@ -854,7 +1165,7 @@ const DEFS: Def[] = [
       if (a.off !== true && num(a, 'rotX') === undefined && num(a, 'rotY') === undefined) return 'give rotX and/or rotY (degrees), or off: true.'
       for (const id of ids(a, 'clips')) {
         const f = editableClip(c, id)
-        if (!(f.lane.kind === 'visual' && isMediaClip(f.clip) && !f.clip.adjust)) return `clip "${id}" is ${clipKind(c, f.clip)}; clip.setRotateXY is for video/image clips.`
+        if (!(f.lane.kind === 'visual' && isPicClip(f.clip) && !f.clip.adjust)) return `clip "${id}" is ${clipKind(c, f.clip)}; clip.setRotateXY is for video/image/composition clips.`
       }
       return null
     },
@@ -898,6 +1209,100 @@ const DEFS: Def[] = [
       return { id: list[0], ids: list }
     },
   },
+  // ── 空物件／父子连结／表达式／3D 摄影机灯光（rig.pure·expr.pure）──
+  {
+    id: 'null.add',
+    params: [P.at(true, 'Start on the timeline (seconds)'), P.length(RIG_DEFAULT_SECONDS),
+      { name: 'x', type: 'number', min: -POS_LIM, max: POS_LIM, note: 'Offset from the frame centre in frame widths (+ = right; default 0)' },
+      { name: 'y', type: 'number', min: -POS_LIM, max: POS_LIM, note: 'Offset from the frame centre in frame heights (+ = up; default 0)' },
+      { name: 'd3', type: 'boolean', note: 'true = make it a 3D null (so 3D children follow its depth and 3D rotation)' },
+      P.lane(false, 'Visual lane to use; omit = the editor picks')],
+    requires: 'A chosen lane must be a visual lane and not locked.',
+    description: 'Add a null object: an invisible controller clip on a visual lane (the editor preview shows a dashed box; export draws nothing). Animate it with clip.setLook / clip.setKeyframe / clip.setAnim (x, y, sx, sy, rot, opacity) and attach other clips to it with clip.setParent — they then move, scale and rotate with it.',
+    check: (c, a) => { laneFits(c, str(a, 'lane'), 'visual', 'null objects'); return null },
+    run: (c, a) => {
+      const clip = newNullClip(c.newId())
+      clip.length = snapFrame(num(a, 'length') ?? RIG_DEFAULT_SECONDS)
+      const look: Record<string, number> = {}
+      if (num(a, 'x')) look.x = num(a, 'x')!
+      if (num(a, 'y')) look.y = num(a, 'y')!
+      if (Object.keys(look).length) clip.look = look
+      if (a.d3 === true) clip.d3 = {}
+      return placed(c, place(c, 'visual', clip, num(a, 'at')!, str(a, 'lane')), clip.id)
+    },
+  },
+  {
+    id: 'clip.setParent',
+    params: [P.clips(), { name: 'parent', type: 'clip', required: true, nullable: true, note: 'Parent clip id (a video/image, shape, text, sticker or null-object clip); null = detach' },
+      { name: 'alpha', type: 'boolean', note: 'true = the parent\'s opacity multiplies into these clips too (default false: only position / scale / rotation)' }],
+    requires: 'Video/image, shape/solid/animated-background, text, sticker or null-object clips (cameras and lights may have a parent but cannot be one); lanes not locked; no loops.',
+    description: 'Parent clips to another clip: the parent\'s position, scale and rotation at every moment (base values, keyframes, expressions and clip animations) cascade down to them, through the whole parent chain. The child keeps its own transform on top, relative to the parent at rest (parent at its default position/scale/rotation = no change). A chain that would loop back to itself is refused. 3D parents also carry depth and 3D rotation to 3D children.',
+    check: (c, a) => {
+      const pid = a.parent === null ? null : str(a, 'parent')!
+      const pf = pid ? clipOf(c, pid) : null
+      if (pf && !canParent(pf.clip, pf.lane.kind)) return `clip "${pid}" is ${clipKind(c, pf.clip)} — it can't be a parent (use a video/image, shape, text, sticker or null-object clip).`
+      for (const id of ids(a, 'clips')) {
+        const f = editableClip(c, id)
+        if (!canChild(f.clip, f.lane.kind)) return `clip "${id}" is ${clipKind(c, f.clip)}; clip.setParent is for video/image, shape, text, sticker, null-object, camera and light clips.`
+        if (pid === id) return `clip "${id}" can't be its own parent.`
+        if (pid && parentLoops(c.tracks, id, pid)) return `parenting "${id}" to "${pid}" would make a loop ("${pid}" is already under "${id}") — detach one of them first.`
+      }
+      return null
+    },
+    run: (c, a) => {
+      const list = ids(a, 'clips'), pid = a.parent === null ? null : str(a, 'parent')!
+      for (const id of list) c.tracks = patchRigClip(c.tracks, id, { parent: pid, ...(pid ? { parentAlpha: a.alpha === true } : {}) })
+      return { id: list[0], ids: list }
+    },
+  },
+  {
+    id: 'clip.setExpression',
+    params: [P.clip(), { name: 'prop', type: 'string', required: true, note: 'Property to drive — any keyframable property of this clip (same names as clip.setKeyframe values; 3D layers also d3.z, d3.rx, d3.ry, d3.rz; cameras cam.*; lights lt.*)' },
+      { name: 'expr', type: 'string', required: true, nullable: true, note: 'Expression (max 1000 chars); null = remove. Language: numbers, + - * / % **, comparisons, && || !, a ? b : c, var/let/const x = …; (last statement = result). Names: time (timeline seconds), value (the keyframed / base value), thisClip, clip("id"), Math.*, PI. Functions: wiggle(freq, amp, octaves?, ampMult?, t?), loopOut("cycle"|"pingpong", numKeyframes?), linear/ease/easeIn/easeOut(t, tMin, tMax, v1, v2) or (t, v1, v2), clamp(v, lo, hi), noise(x), sin/cos/abs/min/max/… . Clip handles: .start .length .end .offset and any property (.x .y .sx .rot .opacity .tx … .z .rx .ry .rz) or .prop("name", t?) = that clip\'s value now (or at t).' }],
+    requires: 'A clip with that keyframable property; lane not locked; the expression must parse.',
+    description: 'Drive one property of a clip with an expression, evaluated every frame in a sandbox (no globals, no network, step and time limits). If it fails at some moment the property falls back to its keyframed / base value there (the editor panel shows the error in red). Examples: "wiggle(2, 0.03)" on x; "value + time * 30" on rot; "loopOut(\'pingpong\')"; "clip(\'abc\').x * -1".',
+    check: (c, a) => {
+      const f = editableClip(c, str(a, 'clip')!), p = str(a, 'prop')!
+      const can = exprPropsFor(f.clip, f.lane.kind)
+      if (!can.includes(p as KfProp)) return can.length ? `"${p}" can't take an expression on this ${clipKind(c, f.clip)} clip — it takes ${can.join(', ')}.` : `clip "${f.clip.id}" (${clipKind(c, f.clip)}) has no properties that take expressions.`
+      if (a.expr !== null) { const r = compileExpr(str(a, 'expr')!); if (!r.ok) return `the expression doesn't parse: ${r.err}.` }
+      return null
+    },
+    run: (c, a) => {
+      const id = str(a, 'clip')!, p = str(a, 'prop') as KfProp
+      c.tracks = patchRigClip(c.tracks, id, { expr: { prop: p, src: a.expr === null ? null : str(a, 'expr')! } })
+      if (a.expr === null) return { id, ids: [id] }
+      // 试算一次（片段开头）：执行错照存（回原值）·回报给角色
+      setExprScene(c.tracks)
+      const x = findClip(c.tracks, id)!.clip
+      const st = exprStatus(x, p, x.start, srcAt(x, x.start), 0)
+      const v = st && st.ok ? propValue(x, p, x.start) : null
+      return { id, ids: [id], ...(st && !st.ok ? { note: `saved, but at the clip start it fails (${st.err}) — there it falls back to the keyframed / base value.` } : { data: { at: r3(x.start), value: v === null ? null : r3(v) } }) }
+    },
+  },
+  {
+    id: 'clip.set3d',
+    params: [P.clips(), { name: 'on', type: 'boolean', note: 'false = back to a 2D layer (removes depth, 3D rotation and their keyframes / expressions); default true' },
+      { name: 'z', type: 'number', min: -POS3_LIM, max: POS3_LIM, note: 'Depth in frame heights (+ = farther from the camera; 0 = on the picture plane)' },
+      { name: 'rx', type: 'number', min: -ROT3_LIM, max: ROT3_LIM, note: 'Tilt around x in degrees (+ = bottom edge goes away)' },
+      { name: 'ry', type: 'number', min: -ROT3_LIM, max: ROT3_LIM, note: 'Turn around y in degrees (+ = right edge goes away)' },
+      { name: 'rz', type: 'number', min: -ROT3_LIM, max: ROT3_LIM, note: 'Roll around z in degrees, clockwise' }],
+    requires: 'Video/image, shape/solid/animated-background, text, sticker or null-object clips; lanes not locked.',
+    description: 'Make clips 3D layers: each becomes a flat card in 3D space, seen through the active camera (camera.add; without one a default camera shows depth 0 exactly as 2D) with true perspective, drawn far-to-near among neighbouring 3D layers, and lit by lights (light.add; without lights 3D layers are unlit = unchanged). Keyframe d3.z / d3.rx / d3.ry / d3.rz with clip.setKeyframe. Preview, export and video_edit_frame use the same projection.',
+    check: (c, a) => {
+      if (a.on !== false && ['z', 'rx', 'ry', 'rz', 'on'].every((k) => a[k] === undefined)) return 'give on, z, rx, ry and/or rz.'
+      for (const id of ids(a, 'clips')) { const f = editableClip(c, id); if (!can3d(f.clip, f.lane.kind)) return `clip "${id}" is ${clipKind(c, f.clip)}; only video/image, shape, text, sticker and null-object clips can be 3D.` }
+      return null
+    },
+    run: (c, a) => {
+      const list = ids(a, 'clips')
+      const d3: Record<string, number> = {}
+      for (const k of ['z', 'rx', 'ry', 'rz']) if (num(a, k) !== undefined) d3[k] = num(a, k)!
+      for (const id of list) c.tracks = patchRigClip(c.tracks, id, { d3: a.on === false ? null : d3 })
+      return { id: list[0], ids: list }
+    },
+  },
+  ...rigCommands(),
   {
     id: 'clip.setKeyframe',
     params: [P.clip(), P.at(true, 'Timeline time of the keyframe (seconds; inside the clip)'),
@@ -1327,21 +1732,100 @@ const DEFS: Def[] = [
     check: (c, a) => { const f = editableClip(c, str(a, 'clip')!); return f.clip.filter ? null : `clip "${f.clip.id}" is ${clipKind(c, f.clip)}, not a filter.` },
     run: (c, a) => { const id = str(a, 'clip')!; c.tracks = setFilterStrength(c.tracks, id, num(a, 'strength')!); return { id, ids: [id] } },
   },
+  // ── 巢状合成（precomp）：合成＝另一份轨道·画面轨上一段 {comp} 当影片段放·comp.enter 进去照常用各条命令改 ──
+  {
+    id: 'comp.list', readOnly: true, params: [],
+    description: 'List the nested compositions (precomps) of this project: id, name, ratio, length, how many clips, which composition clips use it; also which timeline the following commands work on (main or the composition entered with comp.enter).',
+    run: (c) => {
+      stashLevel(c)
+      return { data: { level: c.level ?? 'main', comps: Object.entries(c.comps).map(([id, x]) => ({ id, name: x.name, ratio: x.ratio, ...(x.length ? { length: x.length } : {}), duration: r3(compDuration(x)), clips: x.tracks.reduce((n, l) => n + l.clips.length, 0), usedBy: compUsers(c, id), contains: compRefs(x.tracks) })) } }
+    },
+  },
+  {
+    id: 'comp.create',
+    params: [{ name: 'name', type: 'string', required: true, note: `Name (max ${COMP_NAME_MAX} chars)` }, ...COMP_RATIO_PARAMS,
+      { name: 'length', type: 'number', min: MIN_CLIP, max: TIME_MAX, note: 'Seconds (default: end of its last clip)' }],
+    requires: `At most ${COMPS_MAX} compositions.`,
+    description: 'Make a new empty composition (its own lanes, length and frame ratio). Returns its id; fill it with comp.enter + the usual commands, place it with clip.add {"comp": id}.',
+    check: (c, a) => (Object.keys(c.comps).length >= COMPS_MAX ? `there are already ${COMPS_MAX} compositions.` : ratioArgBad(a)),
+    run: (c, a) => {
+      const id = c.newId()
+      const len = num(a, 'length')
+      c.comps = { ...c.comps, [id]: { name: str(a, 'name')!.trim().slice(0, COMP_NAME_MAX), ratio: ratioArg(a) ?? { kind: 'fit' }, ...(len !== undefined ? { length: snapFrame(len) } : {}), tracks: [newLane(MAIN_LANE, 'visual')] } }
+      return { id }
+    },
+  },
+  {
+    id: 'comp.fromClips',
+    params: [P.clips(), { name: 'name', type: 'string', note: 'Name of the new composition (default "Comp <n>")' }],
+    requires: 'Clips on the current timeline, lanes not locked.',
+    description: 'Pre-compose: move these clips (with their lanes, times relative to the earliest one) into a new composition and put one composition clip in their place (on the topmost visual lane among them, or a new lane if that time is taken). Returns the composition id; data.clip = the new composition clip id, lane = its lane.',
+    check: (c, a) => {
+      if (Object.keys(c.comps).length >= COMPS_MAX) return `there are already ${COMPS_MAX} compositions.`
+      for (const id of ids(a, 'clips')) editableClip(c, id)
+      return null
+    },
+    run: (c, a) => {
+      const compId = c.newId(), clipId = c.newId()
+      const r = precompose(c.tracks, ids(a, 'clips'), { compId, clipId, newId: () => c.newId(), name: (str(a, 'name') ?? '').trim() || `Comp ${Object.keys(c.comps).length + 1}` })
+      if (!r) fail('nothing to pre-compose (the clips must cover some time).')
+      c.comps = { ...c.comps, [compId]: r!.comp }
+      c.tracks = r!.tracks
+      const f = findClip(c.tracks, clipId)!
+      return { id: compId, ids: [clipId], lane: f.lane.id, data: { clip: clipId, start: r3(f.clip.start), length: r3(f.clip.length) } }
+    },
+  },
+  {
+    id: 'comp.update',
+    params: [{ name: 'comp', type: 'comp', required: true, note: 'Composition id' }, { name: 'name', type: 'string', note: 'New name' }, ...COMP_RATIO_PARAMS,
+      { name: 'length', type: 'number', nullable: true, min: MIN_CLIP, max: TIME_MAX, note: 'Seconds; null = follow its last clip' }],
+    description: 'Rename a composition or change its frame ratio or length. Composition clips that use it keep their own start/length.',
+    check: (_c, a) => (a.name === undefined && a.ratio === undefined && a.length === undefined ? 'give name, ratio or length.' : ratioArgBad(a)),
+    run: (c, a) => {
+      const id = str(a, 'comp')!
+      stashLevel(c)
+      const cur = c.comps[id]
+      const next: VeditComp = { ...cur, ...(a.name !== undefined ? { name: str(a, 'name')!.trim().slice(0, COMP_NAME_MAX) } : {}), ...(a.ratio !== undefined ? { ratio: ratioArg(a)! } : {}) }
+      if (a.length === null) delete next.length; else if (a.length !== undefined) next.length = snapFrame(num(a, 'length')!)
+      c.comps = { ...c.comps, [id]: next }
+      if (c.level === id) c.tracks = next.tracks
+      return { id, data: { duration: r3(compDuration(next)) } }
+    },
+  },
+  {
+    id: 'comp.delete',
+    params: [{ name: 'comp', type: 'comp', required: true, note: 'Composition id' }],
+    requires: 'No composition clip uses it (delete those clips first) and you are not inside it.',
+    description: 'Delete a composition that is no longer used.',
+    check: (c, a) => {
+      const id = str(a, 'comp')!
+      if (c.level === id) return 'you are inside this composition — comp.exit first.'
+      const users = compUsers(c, id)
+      return users.length ? `composition "${id}" is still used by clip(s) ${users.join(', ')} — delete them first.` : null
+    },
+    run: (c, a) => { const id = str(a, 'comp')!; stashLevel(c); const { [id]: _d, ...rest } = c.comps; void _d; c.comps = rest; return { id } },
+  },
+  {
+    id: 'comp.enter',
+    params: [{ name: 'comp', type: 'comp', required: true, note: 'Composition id' }],
+    description: 'Work inside a composition: the following commands of this call (timeline.list, clip.add, text.add, clip.setLook…) read and change that composition\'s lanes instead of the main timeline, until comp.exit or another comp.enter. Like double-clicking a composition clip in the editor.',
+    run: (c, a) => { const id = str(a, 'comp')!; enterLevel(c, id); return { id, data: { composition: { id, name: c.comps[id].name } } } },
+  },
+  {
+    id: 'comp.exit', params: [],
+    description: 'Go back to the main timeline after comp.enter.',
+    run: (c) => { enterLevel(c, null); return { data: { level: 'main' } } },
+  },
+  ...programCommands(),
   // ── 工程 ──
   {
     id: 'project.setRatio',
     params: [{ name: 'ratio', type: 'string', required: true, enum: ['fit', ...PRESET_KEYS, 'custom'], note: '"fit" = follow the first picture on the main lane; a preset; or "custom" with width/height' },
       { name: 'width', type: 'integer', min: CUSTOM_MIN, max: CUSTOM_MAX, note: 'Pixels (ratio "custom" only)' }, { name: 'height', type: 'integer', min: CUSTOM_MIN, max: CUSTOM_MAX, note: 'Pixels (ratio "custom" only)' }],
     description: 'Set the frame ratio of the video.',
-    check: (_c, a) => {
-      const custom = str(a, 'ratio') === 'custom', has = a.width !== undefined || a.height !== undefined
-      if (custom && (a.width === undefined || a.height === undefined)) return 'ratio "custom" needs both width and height (pixels).'
-      if (!custom && has) return 'width/height only go with ratio "custom".'
-      return null
-    },
+    check: (_c, a) => ratioArgBad(a),
     run: (c, a) => {
-      const r = str(a, 'ratio')!
-      c.ratio = r === 'fit' ? { kind: 'fit' } : r === 'custom' ? { kind: 'custom', w: num(a, 'width')!, h: num(a, 'height')! } : { kind: 'preset', key: r as RatioPresetKey }
+      c.ratio = ratioArg(a)!
       return { data: { ratio: c.ratio } }
     },
   },
@@ -1377,7 +1861,7 @@ export function listCommands(): CommandInfo[] {
 
 // ── 参数验值（型别、范围、编号在不在·"$n" 换成前面那步建的编号） ──
 const REF_RE = /^\$(\d+)(?:\.(lane))?$/
-function resolveRef(v: string, kind: 'clip' | 'lane' | 'media', step: number, results: StepResult[]): string {
+function resolveRef(v: string, kind: 'clip' | 'lane' | 'media' | 'comp' | 'program', step: number, results: StepResult[]): string {
   const m = REF_RE.exec(v.trim())
   if (!m) return v.trim()
   const n = Number(m[1])
@@ -1422,11 +1906,14 @@ function validate(def: Def, raw: unknown, c: Ctx, step: number, results: StepRes
         v = [...new Set((list as string[]).map((x) => x.trim()))]
         break
       }
-      case 'clip': case 'lane': case 'media': {
-        if (typeof v !== 'string' || !v.trim()) bad(`a ${p.type} id`)
-        v = resolveRef(v as string, p.type, step, results)
+      case 'clip': case 'lane': case 'media': case 'comp': case 'source': case 'program': {
+        if (typeof v !== 'string' || !v.trim()) bad(`a ${p.type === 'comp' ? 'composition' : p.type === 'source' ? 'media' : p.type} id`)
+        v = resolveRef(v as string, p.type === 'source' ? 'media' : p.type, step, results)
         if (p.type === 'clip') clipOf(c, v as string)
         else if (p.type === 'lane') laneOf(c, v as string)
+        else if (p.type === 'comp') compOf(c, v as string)
+        else if (p.type === 'program') pkgOf(c, v as string)
+        else if (p.type === 'source' && c.comps[v as string] && !mediaOf(c, v as string)) { /* 合成编号 */ }
         else if (!mediaOf(c, v as string)) fail(`media "${v}" is not in this project — add it with media.add, or pick one from media.list.`)
         break
       }
@@ -1459,14 +1946,16 @@ function firstDiff(a: unknown, b: unknown, path = ''): string | null {
 const defaultId = () => globalThis.crypto.randomUUID()
 
 /** 命令改的那几样（轨道、比例、素材清单）——角色那条（applyCommands·整份工程档）与剪辑页人手那条（第二期·页面现况）共用同一支 applyCommandsState */
-export type CmdState = { tracks: Tracks; ratio: RatioSel; media: readonly ProjectMedia[] }
+/** comps＝子合成（缺＝没有·页面人手那条只改眼前那一层·不带） */
+export type CmdState = { tracks: Tracks; ratio: RatioSel; media: readonly ProjectMedia[]; comps?: Comps; programs?: Readonly<Record<string, ProjectProgram>> }
+/** programs＝工程内嵌的程序包（u-…·program.define 加·program.add 认）；页面那条没给 ⇒ 当没有 */
 export type StateResult = { ok: true; state: CmdState; results: StepResult[] } | { ok: false; step: number; command?: string; error: string }
 /** 对一份现况跑一批命令（全有或全无·⛔ 收空轨、⛔ 过 parseProject——那两道由调用方做：角色那条在 applyCommands、页面那条在页面入账） */
 export function applyCommandsState(state: CmdState, steps: readonly CommandStep[], opts: RunOpts = {}): StateResult {
   if (!Array.isArray(steps) || !steps.length) return { ok: false, step: -1, error: 'steps must be a non-empty array of {command, params}.' }
   if (steps.length > VEDIT_STEPS_MAX) return { ok: false, step: -1, error: `at most ${VEDIT_STEPS_MAX} steps per call (got ${steps.length}) — split the work into several calls.` }
   const newId = opts.newId ?? defaultId
-  const c: Ctx = { tracks: state.tracks, ratio: state.ratio, media: [...state.media], newId: () => { const id = newId(); if (!PROJECT_ID_RE.test(id)) throw new Error(`bad id ${id}`); return id }, step: 0, ...(opts.webShots ? { webShots: opts.webShots } : {}), ...(opts.tts ? { tts: opts.tts } : {}), ...(opts.sfx ? { sfx: opts.sfx } : {}) }
+  const c: Ctx = { tracks: state.tracks, root: state.tracks, level: null, comps: { ...(state.comps ?? {}) }, ratio: state.ratio, media: [...state.media], programs: { ...(state.programs ?? {}) }, newId: () => { const id = newId(); if (!PROJECT_ID_RE.test(id)) throw new Error(`bad id ${id}`); return id }, step: 0, ...(opts.webShots ? { webShots: opts.webShots } : {}), ...(opts.tts ? { tts: opts.tts } : {}), ...(opts.sfx ? { sfx: opts.sfx } : {}) }
   const results: StepResult[] = []
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i] as CommandStep | undefined
@@ -1485,7 +1974,8 @@ export function applyCommandsState(state: CmdState, steps: readonly CommandStep[
       throw e
     }
   }
-  return { ok: true, state: { tracks: c.tracks, ratio: c.ratio, media: c.media }, results }
+  stashLevel(c) // 停在合成里也照样存回（下一批从主时间轴起）
+  return { ok: true, state: { tracks: c.root, ratio: c.ratio, media: c.media, programs: c.programs, ...(state.comps || Object.keys(c.comps).length ? { comps: c.comps } : {}) }, results }
 }
 
 /** 跑一批命令（全有或全无）：project＝读到的那份工程；成功回新工程＋每步结果；哪步不合 ⇒ 回第几步与白话原因（工程不动） */
@@ -1494,10 +1984,14 @@ export function applyCommands(project: unknown, steps: readonly CommandStep[], o
   if (steps.length > VEDIT_STEPS_MAX) return { ok: false, step: -1, error: `at most ${VEDIT_STEPS_MAX} steps per call (got ${steps.length}) — split the work into several calls.` }
   const base = parseProject(project)
   if (!base.ok) return { ok: false, step: -1, error: `the project could not be read: ${base.err}` }
-  const ran = applyCommandsState({ tracks: base.project.tracks, ratio: base.project.ratio, media: base.project.media }, steps, opts)
+  const ran = applyCommandsState({ tracks: base.project.tracks, ratio: base.project.ratio, media: base.project.media, programs: base.project.programs, ...(base.project.comps ? { comps: base.project.comps } : {}) }, steps, opts)
   if (!ran.ok) return ran
   const { state: c, results } = ran
-  const draft: VeditProject = { ...base.project, ratio: c.ratio, media: [...c.media], tracks: pruneLanes(c.tracks) }
+  // 合成里的空轨也收（同主时间轴）
+  const comps = c.comps && Object.keys(c.comps).length ? Object.fromEntries(Object.entries(c.comps).map(([k, x]) => [k, { ...x, tracks: pruneLanes(x.tracks) }])) : undefined
+  const { comps: _bc, ...baseRest } = base.project
+  void _bc
+  const draft: VeditProject = { ...baseRest, ratio: c.ratio, media: [...c.media], tracks: pruneLanes(c.tracks), programs: { ...(c.programs ?? {}) }, ...(comps ? { comps } : {}) }
   const check = parseProject(JSON.parse(JSON.stringify(draft)))
   if (!check.ok) return { ok: false, step: steps.length - 1, error: `the result failed the project check: ${check.err}` }
   if (check.drops.length) return { ok: false, step: steps.length - 1, error: `the result would lose items when saved: ${check.drops.slice(0, 5).join('; ')}` }

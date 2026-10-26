@@ -429,7 +429,9 @@ CMD.reg('blobbrush.paint', {i18n:'', undoable:false,
     HK.setGeometry(sh, pd);
     // 新形状画在区域算的那一层（新建的层 L.x=0）：pts 已经是那一层的坐标（L 原本不存在时 ox=oy=0）
     if (L.x !== ox || L.y !== oy) shiftShape(sh, ox - L.x, oy - L.y);
-    L.data.shapes.push(sh); Layer.invalidate(L);
+    L.data.shapes.push(sh);
+    if (window.DrawMode) DrawMode.place(L, sh);         // AI 绘图模式（背面／内部）：新物件改放的位置
+    Layer.invalidate(L);
     VecSel.setShapes(L.id, [sh.id]);
     return {ok:true, id:sh.id, layerId:L.id, merged:[]};
   }

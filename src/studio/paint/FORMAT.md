@@ -60,6 +60,10 @@ A new drawing starts with one white raster layer named `Background` at the botto
 layers above it: without it the canvas is transparent (shown as a dark checkerboard) and dark text on it is
 hard to see. Remove it only when the user asks for a transparent picture.
 
+To change the words of a text layer, edit its `data.text` (and `size`, `font`, `color` for the look); to
+rename it, change `name`. Do not click the text tool on the web canvas and type: under automated control
+keyboard focus is unreliable, letters get lost and the layer name does not follow.
+
 ### Shapes (vector layers)
 
 `data.shapes` is a list, drawn in order. Every shape has `id`, `fill` (`#rrggbb` or `"none"`), `stroke`
@@ -77,6 +81,11 @@ Coordinates are canvas pixels.
 
 Other top-level and per-layer fields (guides, smart-object sources `smartSources`, document info …) are
 written by the editor; leave them as they are if you do not need them.
+
+`brushTips` (optional) holds the custom brush tips this drawing uses or defined (Define Brush Preset, imported
+Photoshop .abr files): `[{"id", "name", "width", "height", "size", "spacing", "enc": "rle", "tip"}]`, where `tip`
+is the grey-scale tip (one byte per pixel, 255 = full paint) PackBits-compressed and base64-encoded. Leave it as
+it is; to paint with a tip, use the editor command `brush.tips.select` (list them with `brush.tips.list`).
 
 Pages: the top level is page 1 (`pageName` = its optional name); `pages` holds pages 2, 3, … — each one is a
 complete single-page drawing (`format`: "dilin-canvas", `version`, `width`, `height`, `layers`, …) plus an

@@ -12,6 +12,12 @@
 //     逻辑 IF IFS AND OR NOT IFERROR IFNA SWITCH｜数学统计 ROUND ROUNDUP ROUNDDOWN ABS INT MOD SUMPRODUCT SUMIF SUMIFS COUNTIF COUNTIFS
 //     AVERAGEIF COUNTA COUNTBLANK MAXIFS MINIFS MEDIAN RANK LARGE SMALL｜查找 VLOOKUP XLOOKUP INDEX MATCH CHOOSE｜文字 CONCAT TEXTJOIN
 //     LEFT RIGHT MID LEN TRIM UPPER LOWER TEXT VALUE SUBSTITUTE FIND｜日期 TODAY NOW DATE YEAR MONTH DAY WEEKDAY DATEDIF EOMONTH。
+//     第二批：数学 PRODUCT POWER SQRT SIGN PI EXP LN LOG LOG10 TRUNC CEILING FLOOR CEILING.MATH FLOOR.MATH MROUND EVEN ODD QUOTIENT GCD LCM
+//     FACT RAND RANDBETWEEN SUMSQ｜统计 AVERAGEIFS STDEV(.S/.P) STDEVP VAR(.S/.P) VARP MODE(.SNGL) RANK.EQ RANK.AVG PERCENTILE(.INC) QUARTILE(.INC)
+//     ｜资讯 ISBLANK ISNUMBER ISTEXT ISNONTEXT ISLOGICAL ISERROR ISERR ISNA ISEVEN ISODD N T｜文字 SEARCH REPLACE REPT PROPER EXACT CHAR CODE
+//     UNICHAR UNICODE CLEAN CONCATENATE TEXTBEFORE TEXTAFTER NUMBERVALUE FIXED｜查找 HLOOKUP LOOKUP ROW COLUMN ROWS COLUMNS OFFSET INDIRECT ADDRESS
+//     ｜日期 TIME HOUR MINUTE SECOND EDATE DAYS NETWORKDAYS WORKDAY WEEKNUM ISOWEEKNUM DATEVALUE TIMEVALUE YEARFRAC｜财务 PMT FV PV NPER NPV RATE IRR。
+//     ROW()／COLUMN() 不带参＝公式所在那格；INDIRECT 只认 A1 写法（R1C1 ⇒ #REF!）；NETWORKDAYS／WORKDAY 周末固定六日。
 //     不做（下期）：动态数组溢出（FILTER SORT UNIQUE·区间当结果放一格 ⇒ #VALUE!）、LET／LAMBDA、三维引用 Sheet1:Sheet3!A1、数组常量 {1,2}。
 //     值的强制转换／日期序号／条件串／TEXT 格式码在 ./formula-lib.ts。
 //   跨表引用（照 Excel 写法）：表格2!A1、表格2!A1:B5、表格2!A:A；名字有空格／符号 ⇒ 单引号 '销售 表'!A1（引号里 '' ＝一个单引号）。
@@ -26,6 +32,7 @@ import {
   ERRORS, isFormulaError, FxError, fail, type FormulaError, type Scalar,
   to15, eq15, numToText, roundTo, toNum, toText, toBool, compareScalars, cmpText, hasWildcard, wildcardRegex, makeCriteria,
   ymdToSerial, serialToYmd, SERIAL_MAX, UNIX_EPOCH_SERIAL, parseNumberText, formatText, daysInMonth,
+  serialToHms, parseDateTimeText, wildcardSource, isLeapYear,
 } from './formula-lib'
 
 export { ERRORS, isFormulaError, type FormulaError, type Scalar }
@@ -332,10 +339,44 @@ export const FUNCTION_SPECS: Readonly<Record<string, { min: number; max: number 
   // 日期
   TODAY: { min: 0, max: 0 }, NOW: { min: 0, max: 0 }, DATE: { min: 3, max: 3 }, YEAR: { min: 1, max: 1 }, MONTH: { min: 1, max: 1 }, DAY: { min: 1, max: 1 },
   WEEKDAY: { min: 1, max: 2 }, DATEDIF: { min: 3, max: 3 }, EOMONTH: { min: 2, max: 2 },
+  // ── 第二批 ──
+  // 数学
+  PRODUCT: { min: 1, max: 255 }, POWER: { min: 2, max: 2 }, SQRT: { min: 1, max: 1 }, SIGN: { min: 1, max: 1 }, PI: { min: 0, max: 0 },
+  EXP: { min: 1, max: 1 }, LN: { min: 1, max: 1 }, LOG: { min: 1, max: 2 }, LOG10: { min: 1, max: 1 }, TRUNC: { min: 1, max: 2 },
+  CEILING: { min: 2, max: 2 }, FLOOR: { min: 2, max: 2 }, 'CEILING.MATH': { min: 1, max: 3 }, 'FLOOR.MATH': { min: 1, max: 3 }, MROUND: { min: 2, max: 2 },
+  EVEN: { min: 1, max: 1 }, ODD: { min: 1, max: 1 }, QUOTIENT: { min: 2, max: 2 }, GCD: { min: 1, max: 255 }, LCM: { min: 1, max: 255 },
+  FACT: { min: 1, max: 1 }, RAND: { min: 0, max: 0 }, RANDBETWEEN: { min: 2, max: 2 }, SUMSQ: { min: 1, max: 255 },
+  // 统计
+  AVERAGEIFS: { min: 3, max: 255 }, STDEV: { min: 1, max: 255 }, 'STDEV.S': { min: 1, max: 255 }, 'STDEV.P': { min: 1, max: 255 }, STDEVP: { min: 1, max: 255 },
+  VAR: { min: 1, max: 255 }, 'VAR.S': { min: 1, max: 255 }, 'VAR.P': { min: 1, max: 255 }, VARP: { min: 1, max: 255 },
+  MODE: { min: 1, max: 255 }, 'MODE.SNGL': { min: 1, max: 255 }, 'RANK.EQ': { min: 2, max: 3 }, 'RANK.AVG': { min: 2, max: 3 },
+  PERCENTILE: { min: 2, max: 2 }, 'PERCENTILE.INC': { min: 2, max: 2 }, QUARTILE: { min: 2, max: 2 }, 'QUARTILE.INC': { min: 2, max: 2 },
+  // 资讯
+  ISBLANK: { min: 1, max: 1 }, ISNUMBER: { min: 1, max: 1 }, ISTEXT: { min: 1, max: 1 }, ISNONTEXT: { min: 1, max: 1 }, ISLOGICAL: { min: 1, max: 1 },
+  ISERROR: { min: 1, max: 1 }, ISERR: { min: 1, max: 1 }, ISNA: { min: 1, max: 1 }, ISEVEN: { min: 1, max: 1 }, ISODD: { min: 1, max: 1 },
+  N: { min: 1, max: 1 }, T: { min: 1, max: 1 },
+  // 文字
+  SEARCH: { min: 2, max: 3 }, REPLACE: { min: 4, max: 4 }, REPT: { min: 2, max: 2 }, PROPER: { min: 1, max: 1 }, EXACT: { min: 2, max: 2 },
+  CHAR: { min: 1, max: 1 }, CODE: { min: 1, max: 1 }, UNICHAR: { min: 1, max: 1 }, UNICODE: { min: 1, max: 1 }, CLEAN: { min: 1, max: 1 },
+  CONCATENATE: { min: 1, max: 255 }, TEXTBEFORE: { min: 2, max: 6 }, TEXTAFTER: { min: 2, max: 6 }, NUMBERVALUE: { min: 1, max: 3 }, FIXED: { min: 1, max: 3 },
+  // 查找
+  HLOOKUP: { min: 3, max: 4 }, LOOKUP: { min: 2, max: 3 }, ROW: { min: 0, max: 1 }, COLUMN: { min: 0, max: 1 }, ROWS: { min: 1, max: 1 },
+  COLUMNS: { min: 1, max: 1 }, OFFSET: { min: 3, max: 5 }, INDIRECT: { min: 1, max: 2 }, ADDRESS: { min: 2, max: 5 },
+  // 日期时间
+  TIME: { min: 3, max: 3 }, HOUR: { min: 1, max: 1 }, MINUTE: { min: 1, max: 1 }, SECOND: { min: 1, max: 1 }, EDATE: { min: 2, max: 2 },
+  DAYS: { min: 2, max: 2 }, NETWORKDAYS: { min: 2, max: 3 }, WORKDAY: { min: 2, max: 3 }, WEEKNUM: { min: 1, max: 2 }, ISOWEEKNUM: { min: 1, max: 1 },
+  DATEVALUE: { min: 1, max: 1 }, TIMEVALUE: { min: 1, max: 1 }, YEARFRAC: { min: 2, max: 3 },
+  // 财务
+  PMT: { min: 3, max: 5 }, FV: { min: 3, max: 5 }, PV: { min: 3, max: 5 }, NPER: { min: 3, max: 5 }, NPV: { min: 2, max: 255 },
+  RATE: { min: 3, max: 6 }, IRR: { min: 1, max: 2 },
 }
 
 /** Excel 2010 以后才有的函数：写进 xlsx 档时要带 _xlfn. 前缀（ECMA-376 第 1 部 §18.17.7「Future functions」·不带 Excel 打开会 #NAME?） */
-export const XLFN_FUNCTIONS: ReadonlySet<string> = new Set(['IFS', 'SWITCH', 'IFNA', 'CONCAT', 'TEXTJOIN', 'MAXIFS', 'MINIFS', 'XLOOKUP'])
+export const XLFN_FUNCTIONS: ReadonlySet<string> = new Set([
+  'IFS', 'SWITCH', 'IFNA', 'CONCAT', 'TEXTJOIN', 'MAXIFS', 'MINIFS', 'XLOOKUP',
+  'STDEV.S', 'STDEV.P', 'VAR.S', 'VAR.P', 'MODE.SNGL', 'RANK.EQ', 'RANK.AVG', 'PERCENTILE.INC', 'QUARTILE.INC', 'CEILING.MATH', 'FLOOR.MATH',
+  'DAYS', 'ISOWEEKNUM', 'NUMBERVALUE', 'UNICHAR', 'UNICODE', 'TEXTBEFORE', 'TEXTAFTER',
+])
 /** 公式原文（不含开头 =）⇒ xlsx <f> 里要写的字（新函数补 _xlfn.·字串里的不动） */
 export function toXlsxFormula(f: string): string { return mapFunctionNames(f, n => (XLFN_FUNCTIONS.has(n.toUpperCase()) ? `_xlfn.${n}` : n)) }
 /** xlsx <f> 里读来的字 ⇒ 公式原文（去掉 _xlfn.／_xlws. 前缀） */
@@ -415,6 +456,8 @@ export class SheetBook {
 export class SheetEvaluator {
   private cache = new Map<string, Scalar>()
   private stack = new Set<string>()
+  /** 正在算的公式格（栈顶＝ROW()／COLUMN() 不带参时的「本格」） */
+  private cur: string[] = []
   private covered: Map<string, string>
   private maxRowCache: number | null = null
   constructor(private cells: SheetCells, merges?: string[], private opts: EvaluatorOptions = {}) {
@@ -440,8 +483,8 @@ export class SheetEvaluator {
     let out: Scalar
     if (cell?.f && cell.f.trim().startsWith('=')) {
       if (this.stack.has(k)) return '#CYCLE!'
-      this.stack.add(k)
-      try { out = this.evalTyped(cell.f) } finally { this.stack.delete(k) }
+      this.stack.add(k); this.cur.push(k)
+      try { out = this.evalTyped(cell.f) } finally { this.stack.delete(k); this.cur.pop() }
     } else if (cell?.s?.numFmt?.t === 'text') {
       out = cell.v ? cell.v : null   // 文字格式（Excel「@」）：数字也当文字（SUM 不算·=A1+1 照四则转换·跟导出后的 Excel 一样）
     } else {
@@ -687,13 +730,14 @@ export class SheetEvaluator {
         const base = this.range(args[0])
         return this.ifsMask(args, base).filter(Boolean).length
       }
-      case 'SUMIFS': case 'MAXIFS': case 'MINIFS': {
+      case 'SUMIFS': case 'MAXIFS': case 'MINIFS': case 'AVERAGEIFS': {
         if (args.length % 2 === 0) return '#VALUE!'
         const vals = this.range(args[0])
         const mask = this.ifsMask(args.slice(1), vals)
         const xs: number[] = []
         vals.d.forEach((y, i) => { if (!mask[i]) return; if (isFormulaError(y)) fail(y); if (typeof y === 'number') xs.push(y) })
         if (name === 'SUMIFS') return xs.reduce((a, b) => a + b, 0)
+        if (name === 'AVERAGEIFS') return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : '#DIV/0!'
         if (!xs.length) return 0
         return name === 'MAXIFS' ? Math.max(...xs) : Math.min(...xs)
       }
@@ -917,8 +961,458 @@ export class SheetEvaluator {
       })
       case 'DATEDIF': return this.lift(args, (a, b, u) => datedif(dateArg(a), dateArg(b), toText(u)))
     }
+    return this.call2(name, args)
+  }
+
+  /** 第二批函数（行为照 Microsoft 各函数说明页·依据写在 formula-fns2.test.ts 各题） */
+  private call2(name: string, args: Node[]): V {
+    const n = args.length
+    switch (name) {
+      // ── 数学 ──
+      case 'PRODUCT': { const xs = this.nums(args); return xs.length ? xs.reduce((a, b) => a * b, 1) : 0 }
+      case 'SUMSQ': return this.nums(args).reduce((a, b) => a + b * b, 0)
+      case 'POWER': return this.lift(args, (x, y) => binop('^', x, y))
+      case 'SQRT': return this.lift(args, x => { const v = toNum(x); return v < 0 ? fail('#NUM!') : Math.sqrt(v) })
+      case 'SIGN': return this.lift(args, x => Math.sign(toNum(x)))
+      case 'PI': return Math.PI
+      case 'EXP': return this.lift(args, x => Math.exp(toNum(x)))
+      case 'LN': return this.lift(args, x => { const v = toNum(x); return v <= 0 ? fail('#NUM!') : Math.log(v) })
+      case 'LOG10': return this.lift(args, x => { const v = toNum(x); return v <= 0 ? fail('#NUM!') : Math.log10(v) })
+      case 'LOG': return this.lift(args, (x, b) => {
+        const v = toNum(x), base = opt(b, 10)
+        if (v <= 0 || base <= 0) return fail('#NUM!')
+        if (base === 1) return fail('#DIV/0!')
+        return base === 10 ? Math.log10(v) : base === 2 ? Math.log2(v) : Math.log(v) / Math.log(base)
+      })
+      case 'TRUNC': return this.lift(args, (x, d) => roundTo(toNum(x), opt(d, 0), 'down'))
+      case 'CEILING': case 'FLOOR': return this.lift(args, (x, s) => {   // 正数配负倍数 ⇒ #NUM!·倍数 0：CEILING 回 0、FLOOR #DIV/0!
+        const v = toNum(x), sig = toNum(s)
+        if (sig === 0) return name === 'CEILING' ? 0 : fail('#DIV/0!')
+        if (v > 0 && sig < 0) return fail('#NUM!')
+        const q = to15(v / sig)
+        return (name === 'CEILING' ? Math.ceil(q) : Math.floor(q)) * sig
+      })
+      case 'CEILING.MATH': case 'FLOOR.MATH': return this.lift(args, (x, s, m) => {   // 倍数取绝对值；负数 mode≠0：CEILING 远离 0、FLOOR 靠近 0
+        const v = toNum(x), sig = Math.abs(opt(s, 1)), away = opt(m, 0) !== 0
+        if (sig === 0) return 0
+        const q = to15(v / sig)
+        const up = name === 'CEILING.MATH' ? !(v < 0 && away) : (v < 0 && away)
+        return (up ? Math.ceil(q) : Math.floor(q)) * sig
+      })
+      case 'MROUND': return this.lift(args, (x, m) => {
+        const v = toNum(x), mm = toNum(m)
+        if (mm === 0) return 0
+        if (v * mm < 0) return fail('#NUM!')
+        return roundTo(v / mm, 0, 'half') * mm
+      })
+      case 'EVEN': case 'ODD': return this.lift(args, x => {   // 远离 0 进到最近的偶数／奇数
+        const v = toNum(x), sg = v < 0 ? -1 : 1, a = Math.abs(to15(v))
+        return sg * (name === 'EVEN' ? Math.ceil(a / 2) * 2 : Math.ceil((a + 1) / 2) * 2 - 1)
+      })
+      case 'QUOTIENT': return this.lift(args, (x, y) => { const d = toNum(y); return d === 0 ? fail('#DIV/0!') : Math.trunc(to15(toNum(x) / d)) })
+      case 'GCD': case 'LCM': {
+        const xs = this.nums(args).map(x => Math.trunc(x))
+        if (xs.some(x => x < 0)) return '#NUM!'
+        const g = (a: number, b: number): number => (b === 0 ? a : g(b, a % b))
+        if (name === 'GCD') return xs.reduce((a, b) => g(a, b), 0)
+        if (xs.some(x => x === 0)) return 0
+        return xs.reduce((a, b) => (a / g(a, b)) * b, 1)
+      }
+      case 'FACT': return this.lift(args, x => {
+        const k = Math.trunc(toNum(x))
+        if (k < 0) return fail('#NUM!')
+        let p = 1
+        for (let i = 2; i <= k && Number.isFinite(p); i++) p *= i
+        return p
+      })
+      case 'RAND': return Math.random()
+      case 'RANDBETWEEN': return this.lift(args, (a, b) => {
+        const lo = Math.ceil(toNum(a)), hi = Math.floor(toNum(b))
+        if (lo > hi) return fail('#NUM!')
+        return lo + Math.floor(Math.random() * (hi - lo + 1))
+      })
+      // ── 统计 ──
+      case 'STDEV': case 'STDEV.S': case 'STDEVP': case 'STDEV.P': case 'VAR': case 'VAR.S': case 'VARP': case 'VAR.P': {
+        const v = variance(this.nums(args), !(name.endsWith('P') || name.endsWith('.P')))
+        return name.startsWith('STDEV') ? Math.sqrt(v) : v
+      }
+      case 'MODE': case 'MODE.SNGL': {   // 出现最多次的数·并列取先出现的·都只出现一次 ⇒ #N/A
+        const xs = this.nums(args)
+        const cnt = new Map<number, number>()
+        let best: number | null = null, bestN = 1
+        for (const x of xs) {
+          const k = to15(x), c = (cnt.get(k) ?? 0) + 1
+          cnt.set(k, c)
+          if (c > bestN) { bestN = c; best = k }
+        }
+        if (best === null) return '#N/A'
+        return xs.find(x => cnt.get(to15(x)) === bestN)!
+      }
+      case 'RANK.EQ': return this.call('RANK', args)
+      case 'RANK.AVG': {   // 同值取名次平均
+        const x = this.num(args[0])
+        const xs = this.nums([args[1]])
+        const asc = args[2] !== undefined && this.num(args[2]) !== 0
+        const same = xs.filter(y => eq15(y, x)).length
+        if (!same) return '#N/A'
+        return 1 + xs.filter(y => !eq15(y, x) && (asc ? y < x : y > x)).length + (same - 1) / 2
+      }
+      case 'PERCENTILE': case 'PERCENTILE.INC': return percentileInc(this.nums([args[0]]), this.num(args[1]))
+      case 'QUARTILE': case 'QUARTILE.INC': {
+        const q = Math.trunc(this.num(args[1]))
+        if (q < 0 || q > 4) return '#NUM!'
+        return percentileInc(this.nums([args[0]]), q / 4)
+      }
+      // ── 资讯（错误不往外传·判断本身） ──
+      case 'ISBLANK': return this.lift(args, x => x === null)
+      case 'ISNUMBER': return this.lift(args, x => typeof x === 'number')
+      case 'ISTEXT': return this.lift(args, x => typeof x === 'string' && !isFormulaError(x))
+      case 'ISNONTEXT': return this.lift(args, x => !(typeof x === 'string' && !isFormulaError(x)))
+      case 'ISLOGICAL': return this.lift(args, x => typeof x === 'boolean')
+      case 'ISERROR': return this.lift(args, x => isFormulaError(x))
+      case 'ISERR': return this.lift(args, x => isFormulaError(x) && x !== '#N/A')
+      case 'ISNA': return this.lift(args, x => x === '#N/A')
+      case 'ISEVEN': case 'ISODD': return this.lift(args, x => {
+        const r = Math.abs(Math.trunc(toNum(x))) % 2
+        return name === 'ISEVEN' ? r === 0 : r === 1
+      })
+      case 'N': return this.lift(args, x => (typeof x === 'number' ? x : typeof x === 'boolean' ? (x ? 1 : 0) : isFormulaError(x) ? fail(x) : 0))
+      case 'T': return this.lift(args, x => (isFormulaError(x) ? fail(x) : typeof x === 'string' ? x : ''))
+      // ── 文字 ──
+      case 'SEARCH': return this.lift(args, (f, w, st) => {   // 不分大小写·认通配 * ? ~（Microsoft SEARCH 说明）
+        const needle = toText(f), hay = toText(w)
+        const start = n >= 3 ? Math.trunc(toNum(st)) : 1
+        if (start < 1 || start > hay.length + 1) return fail('#VALUE!')
+        if (needle === '') return start
+        const m = new RegExp(wildcardSource(needle), 'i').exec(hay.slice(start - 1))
+        return m ? m.index + start : fail('#VALUE!')
+      })
+      case 'REPLACE': return this.lift(args, (t, st, k, nw) => {
+        const s = toText(t), a = Math.trunc(toNum(st)), len = Math.trunc(toNum(k))
+        if (a < 1 || len < 0) return fail('#VALUE!')
+        return s.slice(0, a - 1) + toText(nw) + s.slice(a - 1 + len)
+      })
+      case 'REPT': return this.lift(args, (t, k) => {
+        const s = toText(t), times = Math.trunc(toNum(k))
+        if (times < 0 || s.length * times > 32767) return fail('#VALUE!')
+        return s.repeat(times)
+      })
+      case 'PROPER': return this.lift(args, t => {   // 字母前一字不是字母 ⇒ 大写·其余小写（数字后面也算词首：2nd ⇒ 2Nd·照 Excel）
+        let out = '', prev = false
+        for (const ch of toText(t)) { const isL = /\p{L}/u.test(ch); out += isL ? (prev ? ch.toLowerCase() : ch.toUpperCase()) : ch; prev = isL }
+        return out
+      })
+      case 'EXACT': return this.lift(args, (a, b) => toText(a) === toText(b))
+      case 'CHAR': return this.lift(args, x => { const k = Math.trunc(toNum(x)); return k < 1 || k > 255 ? fail('#VALUE!') : String.fromCharCode(k) })
+      case 'UNICHAR': return this.lift(args, x => { const k = Math.trunc(toNum(x)); return k < 1 || k > 0x10ffff ? fail('#VALUE!') : String.fromCodePoint(k) })
+      case 'CODE': case 'UNICODE': return this.lift(args, x => { const s = toText(x); return s === '' ? fail('#VALUE!') : s.codePointAt(0)! })
+      case 'CLEAN': return this.lift(args, x => toText(x).replace(/[\u0000-\u001F]/g, ''))
+      case 'CONCATENATE': return this.lift(args, (...xs) => { const s = xs.map(toText).join(''); return s.length > 32767 ? fail('#VALUE!') : s })
+      case 'TEXTBEFORE': case 'TEXTAFTER': {
+        const s = toText(this.s(args[0])), d = toText(this.s(args[1]))
+        const inst = n >= 3 && args[2] ? Math.trunc(this.num(args[2])) : 1
+        const ci = n >= 4 && this.num(args[3]) !== 0
+        const atEnd = n >= 5 && toBool(this.s(args[4]))
+        if (inst === 0 || Math.abs(inst) > s.length + 1) return '#VALUE!'
+        const hay = ci ? s.toLowerCase() : s, nd = ci ? d.toLowerCase() : d
+        const hits: Array<{ i: number; len: number }> = []
+        if (nd === '') hits.push({ i: inst > 0 ? 0 : s.length, len: 0 })
+        else for (let i = hay.indexOf(nd); i >= 0; i = hay.indexOf(nd, i + nd.length)) hits.push({ i, len: nd.length })
+        if (atEnd) { if (inst > 0) hits.push({ i: s.length, len: 0 }); else hits.unshift({ i: 0, len: 0 }) }
+        const h = inst > 0 ? hits[inst - 1] : hits[hits.length + inst]
+        if (!h) return n >= 6 ? this.ev(args[5]) : '#N/A'
+        return name === 'TEXTBEFORE' ? s.slice(0, h.i) : s.slice(h.i + h.len)
+      }
+      case 'NUMBERVALUE': return this.lift(args, (t, ds, gs) => {
+        if (typeof t === 'number') return t
+        const dec = ds === undefined ? '.' : toText(ds)[0] ?? '', grp = gs === undefined ? ',' : toText(gs)[0] ?? ''
+        if (!dec || dec === grp) return fail('#VALUE!')
+        let s = toText(t).replace(/\s+/g, '')
+        if (s === '') return 0
+        if (grp) s = s.split(grp).join('')
+        if (s.split(dec).length > 2) return fail('#VALUE!')
+        const v = parseNumberText(s.replace(dec, '.'))
+        return v === null ? fail('#VALUE!') : v
+      })
+      case 'FIXED': return this.lift(args, (x, d, nc) => {
+        const dd = Math.trunc(opt(d, 2)), noCommas = nc !== undefined && toBool(nc)
+        const r = roundTo(toNum(x), dd, 'half')
+        const [i, f] = Math.abs(r).toFixed(Math.max(0, Math.min(dd, 127))).split('.')
+        return (r < 0 ? '-' : '') + (noCommas ? i : i.replace(/\B(?=(\d{3})+(?!\d))/g, ',')) + (f ? '.' + f : '')
+      })
+      // ── 查找／引用 ──
+      case 'HLOOKUP': {
+        const key = this.s(args[0])
+        if (isFormulaError(key)) return key
+        const tb = this.range(args[1])
+        const row = Math.trunc(this.num(args[2]))
+        const approx = args[3] === undefined ? true : toBool(this.s(args[3]))
+        if (row < 1) return '#VALUE!'
+        if (row > tb.rows) return '#REF!'
+        const first = tb.d.slice(0, tb.cols)
+        const i = approx ? approxIndex(first, key, 1) : exactIndex(first, key, true, false)
+        return i < 0 ? '#N/A' : tb.d[(row - 1) * tb.cols + i]
+      }
+      case 'LOOKUP': {   // 向量式（第 3 参）·省第 3 参：一维就在自己里面找·二维照宽高挑首行／首列找、回末行／末列（Microsoft LOOKUP 说明）
+        const key = this.s(args[0])
+        if (isFormulaError(key)) return key
+        const a = this.range(args[1])
+        let look: Scalar[], res: Scalar[]
+        if (n >= 3) {
+          if (a.rows !== 1 && a.cols !== 1) return '#N/A'
+          look = a.d; res = this.range(args[2]).d
+        } else if (a.rows === 1 || a.cols === 1) { look = res = a.d }
+        else if (a.cols > a.rows) { look = a.d.slice(0, a.cols); res = a.d.slice((a.rows - 1) * a.cols) }
+        else { look = []; res = []; for (let r = 0; r < a.rows; r++) { look.push(a.d[r * a.cols]); res.push(a.d[r * a.cols + a.cols - 1]) } }
+        const i = approxIndex(look, key, 1)
+        return i < 0 || i >= res.length ? '#N/A' : res[i]
+      }
+      case 'ROW': case 'COLUMN': {
+        if (n === 0) {
+          const k = this.cur[this.cur.length - 1]
+          const p = k ? parseRef(k) : null
+          if (!p) return '#VALUE!'
+          return name === 'ROW' ? p.row + 1 : p.col + 1
+        }
+        const v = this.ev(args[0])
+        if (isFormulaError(v)) return v
+        if (!isRef(v)) return '#VALUE!'
+        return name === 'ROW' ? v.r0 + 1 : v.c0 + 1
+      }
+      case 'ROWS': case 'COLUMNS': {
+        const v = this.ev(args[0])
+        if (isFormulaError(v)) return v
+        if (isRef(v)) return name === 'ROWS' ? v.r1 - v.r0 + 1 : v.c1 - v.c0 + 1
+        if (isArr(v)) return name === 'ROWS' ? v.rows : v.cols
+        return 1
+      }
+      case 'OFFSET': {
+        const v = this.ev(args[0])
+        if (isFormulaError(v)) return v
+        if (!isRef(v)) return '#VALUE!'
+        const r0 = v.r0 + Math.trunc(this.num(args[1])), c0 = v.c0 + Math.trunc(this.num(args[2]))
+        const h = n >= 4 && args[3] ? Math.trunc(this.num(args[3])) : v.r1 - v.r0 + 1
+        const w = n >= 5 && args[4] ? Math.trunc(this.num(args[4])) : v.c1 - v.c0 + 1
+        if (r0 < 0 || c0 < 0 || h < 1 || w < 1 || r0 + h - 1 > 999998 || c0 + w - 1 > 18277) return '#REF!'
+        return { ...v, r0, c0, r1: r0 + h - 1, c1: c0 + w - 1 }
+      }
+      case 'INDIRECT': {
+        const t = toText(this.s(args[0])).trim()
+        if (n >= 2 && !toBool(this.s(args[1]))) return '#REF!'   // R1C1 写法不认
+        const pre = sheetPrefixAt(t, 0)
+        const body = (pre ? t.slice(pre.end) : t).replace(/\$/g, '').toUpperCase()
+        const at = pre ? { sh: pre.name } : {}
+        let m: RegExpExecArray | null
+        if ((m = /^([A-Z]{1,3}\d{1,6})(?::([A-Z]{1,3}\d{1,6}))?$/.exec(body))) return this.ev(m[2] ? { k: 'range', a: m[1], b: m[2], ...at } : { k: 'ref', v: m[1], ...at })
+        if ((m = /^([A-Z]{1,3}):([A-Z]{1,3})$/.exec(body))) return this.ev({ k: 'cols', a: m[1], b: m[2], ...at })
+        return '#REF!'
+      }
+      case 'ADDRESS': return this.lift(args, (r, c, ab, a1, sh) => {
+        const row = Math.trunc(toNum(r)), col = Math.trunc(toNum(c)), abs = Math.trunc(opt(ab, 1))
+        if (row < 1 || row > 1048576 || col < 1 || col > 18278 || abs < 1 || abs > 4) return fail('#VALUE!')
+        const rAbs = abs === 1 || abs === 2, cAbs = abs === 1 || abs === 3
+        const ref = a1 === undefined || toBool(a1)
+          ? `${cAbs ? '$' : ''}${indexToCol(col - 1)}${rAbs ? '$' : ''}${row}`
+          : `R${rAbs ? row : `[${row}]`}C${cAbs ? col : `[${col}]`}`
+        const s = sh === undefined ? '' : toText(sh)
+        return s ? `${quoteSheetName(s)}!${ref}` : ref
+      })
+      // ── 日期时间 ──
+      case 'TIME': return this.lift(args, (h, m, s) => {
+        const H = Math.trunc(toNum(h)), M = Math.trunc(toNum(m)), S = Math.trunc(toNum(s))
+        if (H > 32767 || M > 32767 || S > 32767) return fail('#NUM!')
+        const total = H * 3600 + M * 60 + S
+        if (total < 0) return fail('#NUM!')
+        return (total % 86400) / 86400
+      })
+      case 'HOUR': case 'MINUTE': case 'SECOND': return this.lift(args, x => {
+        const t = serialToHms(dateArg(x))
+        return name === 'HOUR' ? t.h : name === 'MINUTE' ? t.mi : t.s
+      })
+      case 'EDATE': return this.lift(args, (x, m) => {   // 月底日对到目标月的最后一天（1/31 加一个月 ⇒ 2/28）
+        const ymd = serialToYmd(dateArg(x))
+        if (!ymd) return fail('#NUM!')
+        const total = ymd.y * 12 + (ymd.m - 1) + Math.trunc(toNum(m))
+        const ty = Math.floor(total / 12), tm = total - ty * 12 + 1
+        if (ty < 1900 || ty > 9999) return fail('#NUM!')
+        const s = ymdToSerial(ty, tm, Math.min(ymd.d, daysInMonth(ty, tm)))
+        return s === null ? fail('#NUM!') : s
+      })
+      case 'DAYS': return this.lift(args, (e, s) => Math.floor(dateArg(e)) - Math.floor(dateArg(s)))
+      case 'NETWORKDAYS': {
+        const a = Math.floor(dateArg(this.s(args[0]))), b = Math.floor(dateArg(this.s(args[1])))
+        const hol = this.holidays(args[2])
+        const lo = Math.min(a, b), hi = Math.max(a, b)
+        let k = 0
+        for (let d = lo; d <= hi; d++) if (!isWeekend(d) && !hol.has(d)) k++
+        return a <= b ? k : -k
+      }
+      case 'WORKDAY': {
+        let d = Math.floor(dateArg(this.s(args[0])))
+        let left = Math.trunc(this.num(args[1]))
+        if (Math.abs(left) > 1_000_000) return '#NUM!'
+        const hol = this.holidays(args[2])
+        const step = left < 0 ? -1 : 1
+        while (left !== 0) { d += step; if (d < 0 || d > SERIAL_MAX) return '#NUM!'; if (!isWeekend(d) && !hol.has(d)) left -= step }
+        return d
+      }
+      case 'WEEKNUM': return this.lift(args, (x, t) => {   // 1 月 1 日那周是第 1 周；类型定一周从星期几起（21＝ISO）
+        const d = Math.floor(dateArg(x)), type = Math.trunc(opt(t, 1))
+        if (type === 21) return isoWeek(d)
+        const start = type === 1 || type === 17 ? 0 : type === 2 || type === 11 ? 1 : type >= 12 && type <= 16 ? type - 10 : -1
+        if (start < 0) return fail('#NUM!')
+        const ymd = serialToYmd(d)
+        const jan1 = ymd ? ymdToSerial(ymd.y, 1, 1) : null
+        if (jan1 === null) return fail('#NUM!')
+        const off = (((jan1 + 6) % 7) - start + 7) % 7
+        return Math.floor((d - jan1 + off) / 7) + 1
+      })
+      case 'ISOWEEKNUM': return this.lift(args, x => isoWeek(Math.floor(dateArg(x))))
+      case 'DATEVALUE': case 'TIMEVALUE': return this.lift(args, x => {
+        if (isFormulaError(x)) return fail(x)
+        if (typeof x !== 'string') return fail('#VALUE!')
+        const v = parseDateTimeText(x)
+        if (v === null) return fail('#VALUE!')
+        return name === 'DATEVALUE' ? Math.floor(v) : v - Math.floor(v)
+      })
+      case 'YEARFRAC': return this.lift(args, (a, b, bs) => yearfrac(Math.floor(dateArg(a)), Math.floor(dateArg(b)), Math.trunc(opt(bs, 0))))
+      // ── 财务（现金流正负号照 Excel：付出为负、收入为正） ──
+      case 'PMT': return this.lift(args, (r, k, pv, fv, ty) => {
+        const rate = toNum(r), nper = toNum(k), p = toNum(pv), f = opt(fv, 0), t = opt(ty, 0) ? 1 : 0
+        if (nper === 0) return fail('#NUM!')
+        if (rate === 0) return -(p + f) / nper
+        const g = Math.pow(1 + rate, nper)
+        return -(rate * (f + p * g)) / ((1 + rate * t) * (g - 1))
+      })
+      case 'FV': return this.lift(args, (r, k, pm, pv, ty) => {
+        const rate = toNum(r), nper = toNum(k), pmt = toNum(pm), p = opt(pv, 0), t = opt(ty, 0) ? 1 : 0
+        if (rate === 0) return -(p + pmt * nper)
+        const g = Math.pow(1 + rate, nper)
+        return -(p * g + pmt * (1 + rate * t) * (g - 1) / rate)
+      })
+      case 'PV': return this.lift(args, (r, k, pm, fv, ty) => {
+        const rate = toNum(r), nper = toNum(k), pmt = toNum(pm), f = opt(fv, 0), t = opt(ty, 0) ? 1 : 0
+        if (rate === 0) return -(f + pmt * nper)
+        const g = Math.pow(1 + rate, nper)
+        return -(f + pmt * (1 + rate * t) * (g - 1) / rate) / g
+      })
+      case 'NPER': return this.lift(args, (r, pm, pv, fv, ty) => {
+        const rate = toNum(r), pmt = toNum(pm), p = toNum(pv), f = opt(fv, 0), t = opt(ty, 0) ? 1 : 0
+        if (rate === 0) return pmt === 0 ? fail('#NUM!') : -(p + f) / pmt
+        const num = pmt * (1 + rate * t) - f * rate, den = p * rate + pmt * (1 + rate * t)
+        if (den === 0 || num / den <= 0) return fail('#NUM!')
+        return Math.log(num / den) / Math.log(1 + rate)
+      })
+      case 'NPV': {   // 第一笔在第 1 期末
+        const rate = this.num(args[0])
+        if (rate === -1) return '#DIV/0!'
+        return this.nums(args.slice(1)).reduce((s, v, i) => s + v / Math.pow(1 + rate, i + 1), 0)
+      }
+      case 'RATE': return this.lift(args, (k, pm, pv, fv, ty, gs) => {
+        const nper = toNum(k), pmt = toNum(pm), p = toNum(pv), f = opt(fv, 0), t = opt(ty, 0) ? 1 : 0
+        const eq = (r: number) => (r === 0 ? p + pmt * nper + f : p * Math.pow(1 + r, nper) + pmt * (1 + r * t) * (Math.pow(1 + r, nper) - 1) / r + f)
+        return newton(eq, opt(gs, 0.1))
+      })
+      case 'IRR': {   // 第一笔在第 0 期；要同时有正有负
+        const vs = this.nums([args[0]])
+        if (!vs.some(v => v > 0) || !vs.some(v => v < 0)) return '#NUM!'
+        return newton(r => vs.reduce((s, v, i) => s + v / Math.pow(1 + r, i), 0), n >= 2 ? this.num(args[1]) : 0.1)
+      }
+    }
     return '#NAME?'
   }
+  /** 假日清单（NETWORKDAYS／WORKDAY 第 3 参）：区间里的日期序号·文字日期也认 */
+  private holidays(a: Node | undefined): Set<number> {
+    const out = new Set<number>()
+    if (!a) return out
+    const v = this.ev(a)
+    for (const x of this.arr(isFormulaError(v) ? fail(v) : v).d) {
+      if (x === null || x === '') continue
+      out.add(Math.floor(dateArg(x)))
+    }
+    return out
+  }
+}
+
+/** 选填参数：没写 ⇒ 预设值（写了空格照四则当 0） */
+function opt(x: Scalar | undefined, d: number): number { return x === undefined ? d : toNum(x) }
+function variance(xs: number[], sample: boolean): number {
+  const k = xs.length
+  if (k < (sample ? 2 : 1)) return fail('#DIV/0!')
+  const m = xs.reduce((a, b) => a + b, 0) / k
+  return xs.reduce((a, x) => a + (x - m) * (x - m), 0) / (sample ? k - 1 : k)
+}
+/** PERCENTILE.INC：排序后在 k×(n−1) 的位置线性内插 */
+function percentileInc(xs: number[], k: number): number {
+  if (!xs.length || k < 0 || k > 1) return fail('#NUM!')
+  const s = [...xs].sort((a, b) => a - b)
+  const pos = k * (s.length - 1), lo = Math.floor(pos), hi = Math.ceil(pos)
+  return s[lo] + (s[hi] - s[lo]) * (pos - lo)
+}
+/** 序号是不是星期六日（序号 1＝1900-01-01 当星期日·同 WEEKDAY） */
+function isWeekend(d: number): boolean { const w = (d + 6) % 7; return w === 0 || w === 6 }
+/** ISO 周：星期一起·那周的星期四落在哪一年就算哪一年的第几周 */
+function isoWeek(d: number): number {
+  const sun0 = (d + 6) % 7, iso = sun0 === 0 ? 7 : sun0
+  const thu = d - iso + 4
+  const ymd = serialToYmd(thu)
+  const jan1 = ymd ? ymdToSerial(ymd.y, 1, 1) : null
+  if (jan1 === null) return fail('#NUM!')
+  return Math.floor((thu - jan1) / 7) + 1
+}
+/** YEARFRAC：basis 0 美式 30/360·1 实际/实际·2 实际/360·3 实际/365·4 欧式 30/360（算法同 Excel 公开说明与 LibreOffice） */
+function yearfrac(a: number, b: number, basis: number): number {
+  if (basis < 0 || basis > 4) return fail('#NUM!')
+  const s = Math.min(a, b), e = Math.max(a, b)
+  const p = serialToYmd(s), q = serialToYmd(e)
+  if (!p || !q) return fail('#NUM!')
+  if (basis === 2) return (e - s) / 360
+  if (basis === 3) return (e - s) / 365
+  if (basis === 0 || basis === 4) {
+    let sd = p.d, ed = q.d
+    if (basis === 4) { if (sd === 31) sd = 30; if (ed === 31) ed = 30 }
+    else {
+      const lastFeb = (y: number, m: number, d: number) => m === 2 && d === daysInMonth(y, 2)
+      if (lastFeb(p.y, p.m, p.d) && lastFeb(q.y, q.m, q.d)) { sd = 30; ed = 30 }
+      else if (lastFeb(p.y, p.m, p.d)) sd = 30
+      if (ed === 31 && sd >= 30) ed = 30
+      if (sd === 31) sd = 30
+    }
+    return ((q.y - p.y) * 360 + (q.m - p.m) * 30 + (ed - sd)) / 360
+  }
+  // basis 1：一年以内看期间有没有 2/29（有 ⇒ 366）；跨好几年 ⇒ 用这几个年头的平均天数
+  const withinYear = p.y === q.y || (q.y === p.y + 1 && (p.m > q.m || (p.m === q.m && p.d >= q.d)))
+  if (withinYear) {
+    let ylen = 365
+    if (p.y === q.y) { if (isLeapYear(p.y)) ylen = 366 }
+    else {
+      for (const y of [p.y, q.y]) {
+        if (!isLeapYear(y)) continue
+        const f29 = ymdToSerial(y, 2, 29)
+        if (f29 !== null && f29 >= s && f29 <= e) ylen = 366
+      }
+    }
+    return (e - s) / ylen
+  }
+  const first = ymdToSerial(p.y, 1, 1), after = ymdToSerial(q.y + 1, 1, 1)
+  if (first === null || after === null) return fail('#NUM!')
+  return (e - s) / ((after - first) / (q.y - p.y + 1))
+}
+/** 牛顿法解 f(r)=0（RATE／IRR·数值导数·100 步内收不拢 ⇒ #NUM!） */
+function newton(f: (r: number) => number, guess: number): number {
+  let r = guess
+  for (let i = 0; i < 100; i++) {
+    const y = f(r)
+    if (!Number.isFinite(y)) break
+    if (Math.abs(y) < 1e-10) return r
+    const h = Math.max(1e-7, Math.abs(r) * 1e-7)
+    const d = (f(r + h) - y) / h
+    if (!Number.isFinite(d) || d === 0) break
+    const nr = r - y / d
+    if (nr <= -1) r = (r - 1) / 2
+    else { if (Math.abs(nr - r) < 1e-12) return nr; r = nr }
+  }
+  return fail('#NUM!')
 }
 
 /** 日期参数：数＝序号·文字照日期解析（"2026-10-16"）·负或超过 9999-12-31 ⇒ #NUM! */

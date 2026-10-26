@@ -277,6 +277,11 @@ function layerName(text){                    // type_cmds.rs:411 layer_name
   const name = chars(first).slice(0, NAME_MAX).join('');
   return name || Lang.t('layer.text');
 }
+/* 新建的层以内文命名（type_tool.rs:479）：第一个非空行、去头尾空白、最多 40 字；全空回 '' */
+function createdName(text){
+  const first = normText(text).split('\n').find(l => l.trim()) || '';
+  return chars(first.trim()).slice(0, NAME_MAX).join('');
+}
 function info(L){                            // type_cmds.rs:417 info（文件坐标）
   const lay = layout(L), d = L.data;
   return {ok:true, id:L.id, name:L.name, text:d.text, x:d.x + L.x, y:d.y + L.y, size:d.size, font:d.font, weight:d.weight,
@@ -502,8 +507,7 @@ const TT = window.TypeTool = {
       // 整段编辑还是历史最上面那一步 ⇒ 连步骤一起退掉（vectorcraft text.rs:123 discardEmpty）；否则删层（type_tool.rs:477）
       if (sessionOnTop(ed.session)) CMD.run('edit.undo'); else CMD.run('layer.delete', {id:ed.layer});
     } else if (ed.created){
-      const first = text.split('\n').find(l => l.trim()) || '';
-      const name = chars(first.trim()).slice(0, NAME_MAX).join('');
+      const name = createdName(text);
       if (name !== L.name) CMD.run('text.edit', {layerId:ed.layer, name, coalesce:ed.session});
     }
     UI.draw();
@@ -523,8 +527,15 @@ const TT = window.TypeTool = {
     s = normText(s);
     if (a === b && !s) return;
     const r = CMD.run('text.edit', {layerId:ed.layer, replace:{start:a, end:b, text:s}, coalesce:ed.session});
-    if (r && r.ok !== false && this.ed){ this.ed.caret = a + chars(s).length; this.ed.anchor = this.ed.caret; }
+    if (r && r.ok !== false && this.ed){ this.ed.caret = a + chars(s).length; this.ed.anchor = this.ed.caret; this.syncName(); }
     this.clicks.n = 0;                                                      // vectorcraft text.rs:387 打字后连击重算
+  },
+  /* 新建的层打字当下就以内文命名（PS 打字时图层面板的名字跟着变），不等提交：
+     图层面板／状态列／agent 读图层清单时不会还看到占位的「Lorem Ipsum」。删到全空先留原名（提交时空层整个删掉）；并进同一步历史 */
+  syncName(){
+    const ed = this.ed, L = this.layer(); if (!ed || !ed.created || !L) return;
+    const name = createdName(L.data.text);
+    if (name && name !== L.name) CMD.run('text.edit', {layerId:ed.layer, name, coalesce:ed.session});
   },
   /* type_tool.rs:226 ime_update —— 组字中的字直接写进层里（跟打字一样排版），每次更新换掉上一次的；commit 定案 */
   ime(s, commit){
@@ -541,6 +552,7 @@ const TT = window.TypeTool = {
     if (r && r.ok !== false && this.ed){
       this.ed.caret = start + len; this.ed.anchor = this.ed.caret;
       this.ed.preedit = (commit || len === 0) ? null : [start, len];
+      if (commit) this.syncName();                                          // 组字中的字还没定案，定案了才改名
     }
   },
   /* type_tool.rs:274 select_word（双击）—— 插入点两边连续的字母数字 */

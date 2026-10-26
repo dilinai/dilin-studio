@@ -280,7 +280,7 @@ function scaleFactor(m){ const k = Math.sqrt(Math.abs(m[0]*m[3] - m[1]*m[2])); r
 /* appearance.transform_gradients：填色／描边若是渐变物件（渐变工具定的 {x1,y1,x2,y2…}），端点跟着矩阵走、半径乘平均倍率 */
 function scaleXformPaint(s, key, m){
   const g = s[key]; if (!g || typeof g !== 'object') return;
-  if (window.GradientFill && GradientFill.isGrad(g)){ GradientFill.transform(g, m); return; }   // 渐变单定稿的格式走它自己的 GradientGeom::transform
+  if (window.GradientFill && (GradientFill.isGrad(g) || (GradientFill.isFree && GradientFill.isFree(g)))){ GradientFill.transform(g, m); return; }   // 渐变单定稿的格式走它自己的 GradientGeom::transform（任意形状渐变：点逐个套）
 
   [['x1', 'y1'], ['x2', 'y2'], ['cx', 'cy'], ['fx', 'fy']].forEach(([kx, ky]) => {
     if (typeof g[kx] === 'number' && typeof g[ky] === 'number'){ const q = scaleApplyPt(m, [g[kx], g[ky]]); g[kx] = q[0]; g[ky] = q[1]; }

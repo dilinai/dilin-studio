@@ -22,6 +22,7 @@ MenuTrees.add('ps', 'select', {
     {n:{'zh-Hant':'顏色範圍…', 'zh-Hans':'色彩范围…', en:'Color Range…'}, id:'select.colorRange', impl:'ps.select.colorRange.dialog'},
     {n:{'zh-Hant':'焦點區域…', 'zh-Hans':'焦点区域…', en:'Focus Area…'}, id:'select.focusArea', impl:'ps.select.focusArea.dialog'},
     {n:{'zh-Hant':'主體', 'zh-Hans':'主体', en:'Subject'}, id:'select.subject', impl:'ps.select.subject'},
+    {n:{'zh-Hant':'主體（AI）', 'zh-Hans':'主体（AI）', en:'Subject (AI)'}, id:'select.subjectAI', impl:'genai.selectSubject.ui'},
     {n:{'zh-Hant':'天空', 'zh-Hans':'天空', en:'Sky'}, id:'select.sky', impl:'ps.select.sky'},
     {n:{'zh-Hant':'選取並遮住…', 'zh-Hans':'选择并遮住…', en:'Select and Mask…'}, id:'select.selectAndMask', key:'Ctrl+Alt+R', impl:'ps.select.selectAndMask.dialog'},
     {sep:true},
@@ -37,6 +38,8 @@ MenuTrees.add('ps', 'select', {
     {n:{'zh-Hant':'相似色彩', 'zh-Hans':'选取相似', en:'Similar'}, id:'select.similar', impl:'ps.select.similar'},
     {sep:true},
     {n:{'zh-Hant':'變形選取範圍', 'zh-Hans':'变换选区', en:'Transform Selection'}, id:'select.transformSelection', impl:'ps.select.transformSelection.dialog'},
+    // 变换选区里的「变形」（PS：变换选区时 编辑 ▸ 变换 ▸ 变形）：样式／弯曲／扭曲，只变选区轮廓（menus/impl/ps-edit.js）
+    {n:{'zh-Hant':'變形選取範圍：彎曲…', 'zh-Hans':'变换选区：变形…', en:'Transform Selection: Warp…'}, id:'select.transformSelection.warp', impl:'ps.select.transformSelection.warp.dialog'},
     {sep:true},
     {n:{'zh-Hant':'以快速遮色片模式編輯', 'zh-Hans':'在快速蒙版模式下编辑', en:'Edit in Quick Mask Mode'}, id:'select.editInQuickMaskMode', key:'Q', check:true,
       impl:{cmd:'ps.select.editInQuickMaskMode', checked:() => !!(window.PsSelect && PsSelect.quickMaskOn())}},

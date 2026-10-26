@@ -18,6 +18,7 @@ import { canvasPng, runRelayJob, type DlSite, type RelayJobIn } from './drawboar
 import { writeBack, WRITE_BACK_MS } from './write-back'
 import { OPENED_BY_CLI, paintPageJob, setLiveSite } from './agent-export'
 import { PAINT_FEATURES, type PaintPageHost } from './host'
+import { segConfigFor, segOrtUrl } from './genai'
 
 /** 游客版没有的功能（键见 host.ts PAINT_FEATURES）·外框给的游客宿主 has() 也都回 false */
 export const PAINT_GUEST_FEATURES: Record<keyof typeof PAINT_FEATURES, boolean> = { roleChat: false, roleDrawing: false, cloudDrive: false }
@@ -63,6 +64,8 @@ export default function GuestPaintPage(props: GuestPageProps) {
       // 品牌照外框左上角那颗（同一张图、同一个名字·回 /studio 总页）
       chrome: (tt) => ({ homeHref: studioHref.root(), homeLabel: tt('studio_brand'), homeTitle: tt('studio_all_apps'), logoSrc: studioLogoSrc() }),
       api,
+      // 生成式填充等要扣点 ⇒ 游客版不给 genai（画板出「需登入堤麟」）；本地 AI 去背的模型站同剪辑页识别字幕：网站设了镜像就用它，没设 ⇒ 退回传统演算法
+      segment: () => { const m = (process.env.NEXT_PUBLIC_VEDIT_ASR_MODEL_HOST || '').trim(); return m ? segConfigFor(m, segOrtUrl(`${m.replace(/\/+$/, '')}/npm/`)) : null },
       gate: async () => true,
       initialId: () => projectId,
       isId: (id) => id === projectId,

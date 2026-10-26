@@ -4,6 +4,7 @@
 // 本档只放纯函数（题直接跑）。⛔ 碰 DOM。
 import { findClip, srcAt, type TextBody, type TlClip, type Tracks } from './timeline.pure'
 import { kfApply, kfIndexAt, kfSetEase, kfToggle, kfValue, normalizeKf, type KfEase, type KfProp, type KfTracks } from './keyframe.pure'
+import { kfExpr } from './expr.pure' // 表达式
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 /** 文字那几颗菱形各管哪几项 */
@@ -12,17 +13,20 @@ export const TEXT_KF_PROPS: readonly KfProp[] = ['tx', 'ty', 'ts', 'trot', 'top'
 const has = (kf: KfTracks | undefined, p: KfProp) => !!kf?.[p]?.length
 
 /** 文字片段时间轴第 t 秒的样子（打过关键帧的那几项换成这一刻的值） */
-export function textBodyAt(c: Pick<TlClip, 'text' | 'kf' | 'start' | 'length' | 'offset' | 'speed' | 'curve'>, t: number): TextBody | undefined {
+export function textBodyAt(c: Pick<TlClip, 'text' | 'kf' | 'start' | 'length' | 'offset' | 'speed' | 'curve'> & Partial<Pick<TlClip, 'id' | 'expr'>>, t: number): TextBody | undefined {
   const b = c.text
   const kf = c.kf
-  if (!b || !kf || !TEXT_KF_PROPS.some((p) => has(kf, p))) return b
+  // 有关键帧或表达式（expr.pure kfExpr·出错回关键帧值）的那几项才换
+  const on = (p: KfProp) => has(kf, p) || !!c.expr?.[p]
+  if (!b || !TEXT_KF_PROPS.some(on)) return b
   const s = srcAt(c, t)
   const o: TextBody = { ...b }
-  if (has(kf, 'tx')) o.x = kfValue(kf.tx, s, b.x)
-  if (has(kf, 'ty')) o.y = kfValue(kf.ty, s, b.y)
-  if (has(kf, 'ts')) o.scale = clamp(kfValue(kf.ts, s, b.scale ?? 1), 0.05, 20)
-  if (has(kf, 'trot')) o.rotate = kfValue(kf.trot, s, b.rotate ?? 0)
-  if (has(kf, 'top')) o.opacity = clamp(kfValue(kf.top, s, b.opacity ?? 1), 0, 1)
+  const V = (p: KfProp, base: number) => (c.expr?.[p] ? kfExpr(c, p, t, s, base) : kfValue(kf?.[p], s, base))
+  if (on('tx')) o.x = V('tx', b.x)
+  if (on('ty')) o.y = V('ty', b.y)
+  if (on('ts')) o.scale = clamp(V('ts', b.scale ?? 1), 0.05, 20)
+  if (on('trot')) o.rotate = V('trot', b.rotate ?? 0)
+  if (on('top')) o.opacity = clamp(V('top', b.opacity ?? 1), 0, 1)
   return o
 }
 /** 文字面板一笔改动里关键帧管得到的数值 */
@@ -46,8 +50,9 @@ export function textKfCurrent(c: TlClip, t: number, props: readonly KfProp[]): P
 }
 
 /** 滤镜片段时间轴第 t 秒的强度（0～1·有关键帧照关键帧）；src＝已经算好的素材时刻（layersAt 的 local）可直接给 */
-export function filterStrengthAt(c: Pick<TlClip, 'filter' | 'kf' | 'start' | 'length' | 'offset' | 'speed' | 'curve'>, t: number, src?: number): number {
+export function filterStrengthAt(c: Pick<TlClip, 'filter' | 'kf' | 'start' | 'length' | 'offset' | 'speed' | 'curve'> & Partial<Pick<TlClip, 'id' | 'expr'>>, t: number, src?: number): number {
   const base = c.filter?.strength ?? 0
+  if (c.expr?.flt) return clamp(kfExpr(c, 'flt', t, src ?? srcAt(c, t), base), 0, 1)
   if (!c.kf?.flt?.length) return base
   return clamp(kfValue(c.kf.flt, src ?? srcAt(c, t), base), 0, 1)
 }

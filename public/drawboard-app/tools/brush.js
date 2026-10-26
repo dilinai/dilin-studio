@@ -84,10 +84,20 @@ function defaultBrush(){                                                        
     pose:{ enabled:false, tiltX:0, tiltY:0, rotation:0, pressure:1, overrideTilt:false, overrideRotation:false, overridePressure:false },
     noise:false, wetEdges:false, buildUp:false, buildUpRate:20,
     smoothing:{ amount:0, pulledString:false, catchUp:true, catchUpOnEnd:true, adjustForZoom:true },
-    seed:0
+    seed:0,
+    /* 自订笔尖与 PS 画笔设置的纹理／双重画笔（brush_sections.rs:422-514；栏位名照 PS）：
+       tip＝取样笔尖 id（BrushTips；''＝圆笔尖）；texture 栏位同混合器画笔（tools/mixer.js defTexture）；
+       dualBrush＝第二支笔尖沿同一路径盖印，跟主笔尖的覆盖率照 mode 合成（只有两支都盖到的地方有颜料） */
+    tip:'',
+    texture:{ enabled:false, pattern:'', invert:false, scale:1, brightness:0, contrast:0, eachTip:false, mode:'multiply', depth:1 },
+    dualBrush:{ enabled:false, tip:'', mode:'colorBurn', size:25, hardness:1, spacing:0.25, scatter:0, bothAxes:false, count:1, flip:false }
   };
 }
 const SCHEMA = defaultBrush();
+const TEX_MODES = ['multiply','subtract','darken','overlay','colorDodge','colorBurn','linearBurn','hardMix','linearHeight','height'];   // 同 tools/mixer.js
+const DUAL_MODES = ['multiply','darken','overlay','colorDodge','colorBurn','linearBurn','hardMix','linearHeight'];                     // PS 双重画笔的八种
+const NUM_LIMITS = { 'texture.scale':[0.01, 10], 'texture.brightness':[-150, 150], 'texture.contrast':[-50, 100], 'texture.depth':[0, 1],
+  'dualBrush.size':[1, 5000], 'dualBrush.hardness':[0, 1], 'dualBrush.spacing':[0.01, 10], 'dualBrush.scatter':[0, 10], 'dualBrush.count':[1, 16] };
 
 /* color/src/blend.rs:43-73 LAYER_MODES（命令里用 camelCase 名字；大小写、空白、连字号都不计较） */
 const MODES = ['normal','dissolve','darken','multiply','colorBurn','linearBurn','darkerColor','lighten','screen',
@@ -117,6 +127,7 @@ function mergeInto(base, patch, schema, path, ignored){
     if (sv === undefined){ ignored.push(p); continue; }
     if (isObj(sv)){
       if (!isObj(v)) throw new Error(`invalid brush: \`${p}\` must be an object`);
+      if (!isObj(base[k])) base[k] = clone(sv);           // 旧版存下的笔刷（没有 texture／dualBrush 这几节）补上预设再合并
       mergeInto(base[k], v, sv, p, ignored);
     } else if (Array.isArray(sv)){                       // 颜色
       const c = parseColor(v, null);
@@ -124,12 +135,24 @@ function mergeInto(base, patch, schema, path, ignored){
       base[k] = c;
     } else if (k === 'seed'){
       base[k] = (typeof v === 'string' || isNum(v)) ? String(v) : 0;
-    } else if (k === 'mode'){
+    } else if (p === 'mode'){
       const m = modeOf(v); if (!m) throw new Error(`invalid brush: unknown blend mode \`${v}\``); base[k] = m;
+    } else if (p === 'texture.mode' || p === 'dualBrush.mode'){
+      const L = p === 'texture.mode' ? TEX_MODES : DUAL_MODES;
+      if (!L.includes(v)) throw new Error(`invalid brush: \`${p}\` must be one of ${L.join('|')}`); base[k] = v;
+    } else if (p === 'tip' || p === 'dualBrush.tip'){    // 取样笔尖：id 或名字（''＝圆笔尖）；找不到就报错，不偷偷换回圆笔尖
+      if (typeof v !== 'string') throw new Error(`invalid brush: \`${p}\` must be a brush tip id or name ("" = round)`);
+      if (!v){ base[k] = ''; continue; }
+      const t = BrushTips.get(v);
+      if (!t) throw new Error(`invalid brush: unknown brush tip \`${v}\` (see brush.tips.list)`);
+      base[k] = t.id;
     } else if (k === 'control'){
       if (!CONTROLS.includes(v)) throw new Error(`invalid brush: \`${p}\` must be one of ${CONTROLS.join('|')}`); base[k] = v;
+    } else if (typeof sv === 'string'){
+      if (typeof v !== 'string') throw new Error(`invalid brush: \`${p}\` must be a string`); base[k] = v;
     } else if (typeof sv === 'number'){
-      if (!isNum(v)) throw new Error(`invalid brush: \`${p}\` must be a number`); base[k] = v;
+      if (!isNum(v)) throw new Error(`invalid brush: \`${p}\` must be a number`);
+      base[k] = NUM_LIMITS[p] ? clamp(v, NUM_LIMITS[p][0], NUM_LIMITS[p][1]) : v;
     } else if (typeof sv === 'boolean'){
       if (typeof v !== 'boolean') throw new Error(`invalid brush: \`${p}\` must be true/false`); base[k] = v;
     }
@@ -516,6 +539,345 @@ function dabRect(d){
   return [cx - rr, cy - rr, cx + rr + 1, cy + rr + 1];
 }
 
+/* ═══════════ 取样笔尖库（自订笔尖）：灰阶 alpha（0＝没颜料、255＝满），id＝「tip-」＋内容杂凑 ═══════════
+   来源三处：内建（这里用程序生成，几张常用的）、本机预设库（localStorage dlcanvas.ps.brushPresets——定义画笔预设、读入 .abr 存的，
+   menus/impl/ps-edit.js 的 BrushPresets 也读写这一份）、这份工程档（project.json 的 brushTips：用过／定义过／读入过的笔尖跟着档走）。
+   本机库存的是 PackBits 压过再 base64（enc:'rle'）；旧版存的没有 enc＝原始 base64。localStorage 满了＝saved:false，笔尖照样在这份档里。 */
+const TIP_LS = 'dlcanvas.ps.brushPresets';
+const TIP_MAX = 2500;                          // 笔尖最长边（同定义画笔预设的上限）；.abr 里更大的等比缩下来
+function b64enc(u8){ let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+function b64dec(str){ const s = atob(str), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+/* PackBits（Photoshop 的 RLE）：n≥0＝照抄 n+1 个；-127..-1＝下一个位元组重复 1-n 次；-128 跳过 */
+function packBitsEncode(u8){
+  const out = []; let i = 0;
+  while (i < u8.length){
+    let j = i + 1;
+    while (j < u8.length && j - i < 128 && u8[j] === u8[i]) j++;
+    if (j - i >= 2){ out.push(257 - (j - i), u8[i]); i = j; continue; }
+    j = i;
+    while (j < u8.length && j - i < 128 && !(j + 1 < u8.length && u8[j] === u8[j + 1])) j++;
+    if (j === i) j = i + 1;
+    out.push(j - i - 1); for (let k = i; k < j; k++) out.push(u8[k]); i = j;
+  }
+  return Uint8Array.from(out);
+}
+function packBitsDecode(src, at, end, out, outAt, outLen){
+  let i = at, o = outAt; const stop = outAt + outLen;
+  while (i < end && o < stop){
+    let n = src[i++]; if (n > 127) n -= 256;
+    if (n >= 0){ const m = Math.min(n + 1, stop - o, end - i); out.set(src.subarray(i, i + m), o); i += n + 1; o += m; }
+    else if (n !== -128){ const v = src[i++], m = Math.min(1 - n, stop - o); out.fill(v, o, o + m); o += m; }
+  }
+  return { read: i - at, wrote: o - outAt };
+}
+function tipHash(w, h, a){                     // 两支 32 位 FNV-1a（不同起点）＝ 16 个十六进位字
+  let h1 = 0x811c9dc5 ^ w, h2 = 0x01000193 ^ (h * 2654435761 >>> 0);
+  for (let i = 0; i < a.length; i++){ h1 = Math.imul(h1 ^ a[i], 16777619); h2 = Math.imul(h2 ^ a[i] ^ (i & 255), 2246822519); }
+  return 'tip-' + (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
+}
+/* 等比缩到最长边 ≤ max（面积平均） */
+function shrinkTip(w, h, a, max){
+  const k = Math.max(w, h) / max; if (k <= 1) return { w, h, a };
+  const nw = Math.max(1, Math.round(w / k)), nh = Math.max(1, Math.round(h / k)), o = new Uint8Array(nw * nh);
+  for (let y = 0; y < nh; y++){ const y0 = Math.floor(y * h / nh), y1 = Math.max(y0 + 1, Math.floor((y + 1) * h / nh));
+    for (let x = 0; x < nw; x++){ const x0 = Math.floor(x * w / nw), x1 = Math.max(x0 + 1, Math.floor((x + 1) * w / nw));
+      let s = 0; for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) s += a[yy * w + xx];
+      o[y * nw + x] = Math.round(s / ((y1 - y0) * (x1 - x0))); } }
+  return { w:nw, h:nh, a:o };
+}
+/* 内建程序笔尖（种子固定 ⇒ 每台机器一模一样）：粉笔、喷溅、鬃毛、星点 */
+function builtinTips(){
+  const N = 128, mk = (name, f, spacing) => { const a = new Uint8Array(N * N);
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) a[y * N + x] = Math.round(c01(f(x + 0.5 - N / 2, N / 2 - y - 0.5, x, y)) * 255);
+    return { name, width:N, height:N, a, size:N, spacing, builtin:true }; };
+  const S = BigInt(20261025), r = (i, s) => rand01(S, i, s);
+  const dots = [], bristles = [];
+  for (let i = 0; i < 70; i++){ const ang = r(i, 1) * Math.PI * 2, d = Math.sqrt(r(i, 2)) * 54; dots.push([Math.cos(ang) * d, Math.sin(ang) * d, 1.5 + r(i, 3) * 6 * (1 - d / 70)]); }
+  for (let i = 0; i < 26; i++) bristles.push([-56 + r(i, 4) * 112, 1 + r(i, 5) * 2.5, 0.45 + r(i, 6) * 0.55]);
+  return [
+    mk('Chalk', (u, v, x, y) => { const d = Math.hypot(u, v) / 60; if (d >= 1) return 0; return (hash2(x, y, 0x63686Bn) < 0.72 - d * 0.5 ? 1 : 0) * (1 - smoothstep(0.75, 1, d)); }, 0.2),
+    mk('Spatter', (u, v) => { let m = 0; for (const [cx, cy, rr] of dots){ const d = Math.hypot(u - cx, v - cy); if (d < rr + 1) m = Math.max(m, c01(rr + 0.5 - d)); } return m; }, 0.35),
+    // 鬃毛：一排横向分布的小圆点（笔尖竖着一列鬃毛）⇒ 顺着横向拖成一条条平行的丝
+    mk('Bristle', (u, v) => { let m = 0; for (const [by, bw, op] of bristles){ const d = Math.hypot(u * 0.8, v - by); if (d < bw + 1) m = Math.max(m, c01(bw + 0.5 - d) * op); } return m; }, 0.03),
+    mk('Star', (u, v) => { const ang = Math.atan2(v, u), d = Math.hypot(u, v), rr = 34 + 24 * Math.cos(ang * 5); return c01(rr - d + 0.5) * c01((60 - d) / 4); }, 0.25)
+  ];
+}
+const BrushTips = {
+  mem: new Map(),        // id → {id, name, width, height, a:Uint8Array, size, spacing, source:'builtin'|'local'|'doc'}
+  doc: new Set(),        // 这份工程档带着的笔尖 id（存进 project.json 的 brushTips）
+  _ready: false,
+  _init(){
+    if (this._ready) return; this._ready = true;
+    for (const t of builtinTips()) this._put(Object.assign(t, { id: tipHash(t.width, t.height, t.a) }), 'builtin');
+    for (const e of this._readLS()){ const t = this._decode(e); if (t) this._put(t, 'local'); }
+  },
+  _readLS(){ try { const v = JSON.parse(localStorage.getItem(TIP_LS) || '[]'); return Array.isArray(v) ? v : []; } catch (e){ return []; } },
+  _writeLS(list){ try { localStorage.setItem(TIP_LS, JSON.stringify(list)); return true; } catch (e){ return false; } },
+  /* 存档格式 {id?, name, width, height, size, spacing, tip:base64, enc?:'rle'} → 记忆体格式；坏的回 null */
+  _decode(e){
+    try {
+      if (!e || typeof e.tip !== 'string') return null;
+      const w = e.width | 0, h = e.height | 0; if (!(w > 0 && h > 0 && w <= TIP_MAX * 2 && h <= TIP_MAX * 2)) return null;
+      let a = b64dec(e.tip);
+      if (e.enc === 'rle'){ const o = new Uint8Array(w * h); packBitsDecode(a, 0, a.length, o, 0, o.length); a = o; }
+      if (a.length !== w * h) return null;
+      return { id: typeof e.id === 'string' && /^tip-/.test(e.id) ? e.id : tipHash(w, h, a), name: String(e.name || 'Sampled Brush'), width:w, height:h, a,
+               size: isNum(e.size) ? e.size : Math.max(w, h), spacing: isNum(e.spacing) ? e.spacing : 0.25 };
+    } catch (err){ return null; }
+  },
+  _encode(t){ return { id:t.id, name:t.name, width:t.width, height:t.height, size:t.size, spacing:t.spacing, enc:'rle', tip:b64enc(packBitsEncode(t.a)) }; },
+  _put(t, source){ const o = Object.assign({}, t, { source: (this.mem.get(t.id) || {}).source === 'builtin' ? 'builtin' : source }); delete o.builtin; this.mem.set(o.id, o); return o; },
+  list(){ this._init(); return [...this.mem.values()]; },
+  get(key){
+    this._init(); if (typeof key !== 'string' || !key) return null;
+    return this.mem.get(key) || [...this.mem.values()].find(t => t.name === key) || null;
+  },
+  /* 新增（定义画笔预设、读入 .abr）：{name, width, height, a, size?, spacing?} → {tip, saved}；opts.local＝存进本机库，opts.doc＝跟这份档走 */
+  add(t, opts){
+    this._init(); opts = opts || {};
+    let { w, h, a } = shrinkTip(t.width, t.height, t.a, TIP_MAX);
+    const scaled = w !== t.width;
+    const tip = this._put({ id: tipHash(w, h, a), name: String(t.name || 'Sampled Brush'), width:w, height:h, a,
+                            size: clamp(Math.round(scaled ? Math.max(w, h) : (isNum(t.size) ? t.size : Math.max(w, h))), 1, SIZE_MAX),
+                            spacing: isNum(t.spacing) ? clamp(t.spacing, 0.01, 10) : 0.25 }, opts.local === false ? 'doc' : 'local');
+    let saved = null;
+    if (opts.local !== false){
+      const list = this._readLS().filter(e => e && e.id !== tip.id && !(e.name === tip.name && !e.id));
+      list.push(this._encode(tip)); saved = this._writeLS(list);
+    }
+    if (opts.doc !== false) this.doc.add(tip.id);
+    return { tip, saved, scaled };
+  },
+  rename(key, name){
+    const t = this.get(key); if (!t) return null; if (t.source === 'builtin') throw new Error('built-in brush tips cannot be renamed');
+    t.name = String(name);
+    const list = this._readLS(); let hit = false;
+    list.forEach(e => { if (e && (e.id === t.id || (!e.id && this._decode(e) && this._decode(e).id === t.id))){ e.name = t.name; hit = true; } });
+    if (hit) this._writeLS(list);
+    return t;
+  },
+  remove(key){
+    const t = this.get(key); if (!t) return null; if (t.source === 'builtin') throw new Error('built-in brush tips cannot be deleted');
+    this._writeLS(this._readLS().filter(e => { if (!e) return false; if (e.id) return e.id !== t.id; const d = this._decode(e); return !d || d.id !== t.id; }));
+    this.mem.delete(t.id); this.doc.delete(t.id); StampCache.dropTip(t.id);
+    return t;
+  },
+  /* project.json 的 brushTips */
+  serialize(){ this._init(); return [...this.doc].map(id => this.mem.get(id)).filter(Boolean).map(t => this._encode(t)); },
+  loadDoc(arr){
+    this._init(); this.doc = new Set();
+    if (!Array.isArray(arr)) return 0;
+    let n = 0;
+    for (const e of arr){ const t = this._decode(e); if (!t) continue; if (!this.mem.has(t.id)) this._put(t, 'doc'); this.doc.add(t.id); n++; }
+    return n;
+  },
+  /* 笔尖的 mip 链（浮点 0..1；每层长宽减半、面积平均）：缩小盖印时取够细的那层，不起锯齿 */
+  mips(t){
+    if (t._mips) return t._mips;
+    const L0 = new Float32Array(t.a.length); for (let i = 0; i < L0.length; i++) L0[i] = t.a[i] / 255;
+    const out = [{ w:t.width, h:t.height, a:L0 }];
+    let cur = out[0];
+    while (cur.w > 2 || cur.h > 2){
+      const w = Math.max(1, cur.w >> 1), h = Math.max(1, cur.h >> 1), a = new Float32Array(w * h), fx = cur.w / w, fy = cur.h / h;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++){
+        let s = 0, n = 0;
+        for (let yy = Math.floor(y * fy); yy < Math.min(cur.h, Math.floor((y + 1) * fy)); yy++)
+          for (let xx = Math.floor(x * fx); xx < Math.min(cur.w, Math.floor((x + 1) * fx)); xx++){ s += cur.a[yy * cur.w + xx]; n++; }
+        a[y * w + x] = n ? s / n : 0;
+      }
+      cur = { w, h, a }; out.push(cur);
+    }
+    Object.defineProperty(t, '_mips', { value: out, enumerable:false });
+    return out;
+  },
+  /* 给面板／游标的灰阶缩图（白＝颜料，透明底） */
+  thumb(t, px){
+    const c = document.createElement('canvas'); c.width = c.height = px; const x = c.getContext('2d');
+    const k = px / Math.max(t.width, t.height), w = Math.max(1, Math.round(t.width * k)), h = Math.max(1, Math.round(t.height * k));
+    const s = shrinkTip(t.width, t.height, t.a, Math.max(w, h)), img = x.createImageData(s.w, s.h);
+    for (let i = 0; i < s.a.length; i++){ img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = 230; img.data[i * 4 + 3] = s.a[i]; }
+    x.putImageData(img, Math.floor((px - s.w) / 2), Math.floor((px - s.h) / 2));
+    return c;
+  }
+};
+
+/* ═══════════ Photoshop .abr（v6／v10，子版本 1／2）：'8BIM' 区块里的 'samp'＝取样笔尖；'desc' 里找名字 ═══════════
+   版面照 GIMP app/core/gimpbrush-load.c（abr_supported、gimp_brush_load_abr_v6、gimp_brush_load_abr_brush_v6、abr_rle_decode）：
+     档头 u16 版本、u16 子版本；区块 '8BIM' + 4 字键 + u32 长度；
+     samp 里每个笔尖：u32 长度（补到 4 的倍数）、键（Pascal 字串：1 位元组长度＋UUID）连同杂项，子版本 1 共 47 位元组、子版本 2 共 301 位元组；
+     再来 i32 top/left/bottom/right、i16 位元深度（8／16）、u8 压缩（0＝原始、1＝PackBits：先 height 个 u16 行长再逐行）。
+   名字：'desc' 描述子里 "Nm  " TEXT（预设名）后面跟着的 "sampledData" TEXT（＝笔尖 UUID）就是那支笔尖的名字。
+   读不了的给清楚的错误：v1／v2（Photoshop 5 以前）、其他版本号、没有 samp 区块（只有计算笔尖）。 */
+function parseAbr(u8, baseName){
+  if (!(u8 instanceof Uint8Array)) u8 = new Uint8Array(u8);
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength), n = u8.length;
+  const need = (at, k) => { if (at + k > n) throw new Error('ABR file is truncated (unexpected end of data)'); };
+  const str4 = at => String.fromCharCode(u8[at], u8[at + 1], u8[at + 2], u8[at + 3]);
+  if (n < 4) throw new Error('not a Photoshop brush file (.abr): too short');
+  const ver = dv.getUint16(0), sub = dv.getUint16(2);
+  if (ver === 1 || ver === 2) throw new Error(`Photoshop .abr version ${ver} (Photoshop 5 and earlier) is not supported — open the brushes in Photoshop 6 or later and save them again`);
+  if (ver !== 6 && ver !== 10) throw new Error(`not a supported Photoshop brush file (.abr): unknown version ${ver}`);
+  if (sub !== 1 && sub !== 2) throw new Error(`unsupported Photoshop .abr version ${ver}.${sub} (only sub-versions 1 and 2 are known)`);
+  // 区块
+  const secs = {}; let at = 4;
+  while (at + 12 <= n){
+    if (str4(at) !== '8BIM') throw new Error(`ABR file is damaged: expected an '8BIM' block at byte ${at}`);
+    const key = str4(at + 4), len = dv.getUint32(at + 8), start = at + 12;
+    if (start + len > n) throw new Error(`ABR file is truncated ('${key}' block)`);
+    if (!secs[key]) secs[key] = [start, start + len];
+    at = start + len;
+  }
+  if (at < n && u8.subarray(at).some(v => v)) throw new Error(`ABR file is truncated or damaged: ${n - at} stray bytes at the end`);
+  if (!secs.samp) throw new Error('this .abr has no sampled brush tips (only computed round brushes, which are just size/hardness settings) — nothing to import');
+  // 名字（desc）
+  const names = {};
+  if (secs.desc){
+    const [d0, d1] = secs.desc; let last = null;
+    const text = p => { need(p, 4); const c = dv.getUint32(p); if (c > 4096) return null; need(p + 4, c * 2); let s = ''; for (let i = 0; i < c; i++) s += String.fromCharCode(dv.getUint16(p + 4 + i * 2)); return s.replace(/\0+$/, ''); };
+    for (let p = d0 + 4; p + 4 <= d1; p++){
+      if (u8[p] !== 0x54 || str4(p) !== 'TEXT') continue;               // 'TEXT'
+      if (p >= d0 + 4 && str4(p - 4) === 'Nm  ') last = text(p + 4);
+      else if (p >= d0 + 11 && String.fromCharCode(...u8.subarray(p - 11, p)) === 'sampledData'){ const id = text(p + 4); if (id && last) names[id] = last; }
+    }
+  }
+  // 笔尖（samp）
+  const [s0, s1] = secs.samp, tips = [], skipped = [];
+  let p = s0, idx = 0;
+  while (p + 4 <= s1){
+    const size = dv.getUint32(p), next = p + 4 + Math.ceil(size / 4) * 4;
+    if (size === 0 || p + 4 + size > s1) throw new Error(`ABR file is damaged: brush ${idx + 1} runs past the end of the 'samp' block`);
+    const q = p + 4, klen = u8[q], uuid = String.fromCharCode(...u8.subarray(q + 1, q + 1 + Math.min(klen, 64)));
+    const h0 = q + (sub === 1 ? 47 : 301); need(h0, 19);
+    const top = dv.getInt32(h0), left = dv.getInt32(h0 + 4), bottom = dv.getInt32(h0 + 8), right = dv.getInt32(h0 + 12);
+    const depth = dv.getInt16(h0 + 16), comp = u8[h0 + 18], w = right - left, h = bottom - top;
+    idx++;
+    const name = names[uuid] || `${baseName || 'ABR'} ${idx}`;
+    if (!(w > 0 && h > 0 && w <= 30000 && h <= 30000) || (depth !== 8 && depth !== 16) || comp > 1){
+      skipped.push({ index:idx, name, reason:`unsupported tip (${w}×${h}, ${depth}-bit, compression ${comp})` }); p = next; continue;
+    }
+    const bpp = depth >> 3, rowB = w * bpp, raw = new Uint8Array(rowB * h);
+    let d = h0 + 19;
+    if (!comp){ need(d, raw.length); raw.set(u8.subarray(d, d + raw.length)); }
+    else {
+      need(d, h * 2); const lens = []; for (let y = 0; y < h; y++) lens.push(dv.getUint16(d + y * 2)); d += h * 2;
+      for (let y = 0; y < h; y++){ need(d, lens[y]); packBitsDecode(u8, d, d + lens[y], raw, y * rowB, rowB); d += lens[y]; }
+    }
+    const a = new Uint8Array(w * h);
+    if (bpp === 1) a.set(raw); else for (let i = 0; i < a.length; i++) a[i] = raw[i * 2];   // 16 位：取高位元组（大端）
+    if (!a.some(v => v > 0)){ skipped.push({ index:idx, name, reason:'empty tip' }); p = next; continue; }
+    tips.push({ name, width:w, height:h, a, uuid });
+    p = next;
+  }
+  return { version:`${ver}.${sub}`, tips, skipped };
+}
+
+/* ═══════════ 离屏笔印快取（大笔尖流畅的关键）：同一支笔尖、同大小／角度／圆度／翻转／投影／次像素位置 ⇒ 覆盖值只算一次 ═══════════
+   取样笔尖一律走这里（每格要 mip 选层＋双线性取样，不快取就太慢）；圆笔尖半径 ≥ ROUND_STAMP_R 才走（小的直接算更快、也免得位置量化）。
+   次像素量化到 1/4 像素；角度 0.25°；圆度 1/256。总量超过 STAMP_BUDGET 个浮点就从最旧的丢。 */
+const ROUND_STAMP_R = 32, STAMP_BUDGET = 24e6;
+const StampCache = {
+  map: new Map(), used: 0, hits: 0, misses: 0,
+  get(key, make){
+    let s = this.map.get(key);
+    if (s){ this.map.delete(key); this.map.set(key, s); this.hits++; return s; }
+    s = make(); this.misses++;
+    this.map.set(key, s); this.used += s.a.length + (s.wet ? s.wet.length : 0);
+    while (this.used > STAMP_BUDGET && this.map.size > 1){ const [k, v] = this.map.entries().next().value; this.map.delete(k); this.used -= v.a.length + (v.wet ? v.wet.length : 0); }
+    return s;
+  },
+  dropTip(id){ for (const [k, v] of [...this.map]) if (k.startsWith(id + '|')){ this.map.delete(k); this.used -= v.a.length + (v.wet ? v.wet.length : 0); } },
+  clear(){ this.map.clear(); this.used = 0; this.hits = this.misses = 0; }
+};
+const q4 = v => Math.round(v * 4) / 4;
+/* 一个笔印的快取盖印：{x0,y0,w,h,a,wet?}（图层坐标；a＝0..1 覆盖值，wet＝湿边系数） */
+function stampFor(d, b, tip){
+  const qx = q4(d.cx), qy = q4(d.cy), ix = Math.floor(qx), iy = Math.floor(qy), fx = qx - ix, fy = qy - iy;
+  const proj = d.projScale < 0.999;
+  const angQ = Math.round(d.angle * 180 / Math.PI * 4) / 4, roQ = Math.round(d.roundness * 256) / 256;
+  const wet = !!b.wetEdges;
+  let key, R;
+  if (tip){
+    const s = 2 * d.radius / Math.max(tip.width, tip.height);
+    R = Math.hypot(tip.width * s / 2, tip.height * s * roQ / 2);
+    key = `${tip.id}|${q4(d.radius)}|${angQ}|${roQ}|${d.flipX ? 1 : 0}${d.flipY ? 1 : 0}|${proj ? Math.round(d.projAngle * 180 / Math.PI) + ',' + Math.round(d.projScale * 100) : ''}|${fx},${fy}|${wet ? 1 : 0}|${b.aliased ? 1 : 0}`;
+  } else {
+    R = d.radius;
+    const sym = roQ >= 1 && !proj;                     // 正圆：角度、翻转都没差
+    key = `R|${q4(d.radius)}|${Math.round(c01(b.hardness) * 256)}|${sym ? 0 : angQ}|${roQ}|${proj ? Math.round(d.projAngle * 180 / Math.PI) + ',' + Math.round(d.projScale * 100) : ''}|${fx},${fy}|${wet ? 1 : 0}`;
+  }
+  const K = Math.ceil(R) + 2;
+  const st = StampCache.get(key, () => {
+    const W = 2 * K + 1, a = new Float32Array(W * W), wa = wet ? new Float32Array(W * W) : null;
+    const ang = angQ * Math.PI / 180, sn = Math.sin(ang), cs = Math.cos(ang), sx = d.flipX ? -1 : 1, sy = d.flipY ? -1 : 1;
+    const pr = proj ? [Math.cos(d.projAngle), Math.sin(d.projAngle), 1 / Math.max(d.projScale, 0.05) - 1] : null;
+    let mip = null, s = 1, lv = 0, M = null, tw = 0, th = 0;
+    if (tip){
+      s = 2 * d.radius / Math.max(tip.width, tip.height); tw = tip.width; th = tip.height;
+      const mips = BrushTips.mips(tip); lv = clamp(Math.floor(Math.log2(Math.max(1 / s, 1))), 0, mips.length - 1); M = mips[lv];
+    }
+    const r = d.radius, ro = Math.min(Math.max(roQ, 0.5 / r), 1), rm = Math.max(r * ro, 0.5), hard = b.hardness;
+    const scl = 1 << lv, invS = 1 / s, invSro = 1 / (s * Math.max(roQ, 0.01));
+    for (let j = 0; j < W; j++){
+      const dy = (j - K) + 0.5 - fy;
+      for (let i = 0; i < W; i++){
+        const dx = (i - K) + 0.5 - fx;
+        let ux = dx, uy = -dy;
+        if (pr){ const t = (ux * pr[0] + uy * pr[1]) * pr[2]; ux += t * pr[0]; uy += t * pr[1]; }
+        const u = (ux * cs + uy * sn) * sx, v = (-ux * sn + uy * cs) * sy;
+        let val;
+        if (!tip){
+          const dd = Math.sqrt((u * ro) * (u * ro) + v * v);
+          if (dd >= rm + 0.5) continue;
+          val = dabCoverage(dd, rm, hard);
+          if (wa) wa[j * W + i] = 0.5 + 0.5 * smoothstep(0.5, 1, dd / rm);
+        } else {
+          const tx = (tw / 2 + u * invS) / scl - 0.5, ty = (th / 2 - v * invSro) / scl - 0.5;   // 笔尖像素坐标（这一层 mip）
+          const x0 = Math.floor(tx), y0 = Math.floor(ty), ax = tx - x0, ay = ty - y0;
+          if (x0 < -1 || y0 < -1 || x0 >= M.w || y0 >= M.h) continue;
+          const at = (x, y) => (x >= 0 && y >= 0 && x < M.w && y < M.h) ? M.a[y * M.w + x] : 0;
+          val = (at(x0, y0) * (1 - ax) + at(x0 + 1, y0) * ax) * (1 - ay) + (at(x0, y0 + 1) * (1 - ax) + at(x0 + 1, y0 + 1) * ax) * ay;
+          if (b.aliased) val = val >= 0.5 ? 1 : 0;
+          if (wa) wa[j * W + i] = 0.5 + 0.5 * (1 - val);   // 取样笔尖的湿边：颜料越实越淡，边缘留得较深
+        }
+        if (val > 0) a[j * W + i] = val;
+      }
+    }
+    return { K, w:W, h:W, a, wet:wa };
+  });
+  return { x0: ix - st.K, y0: iy - st.K, w: st.w, h: st.h, a: st.a, wet: st.wet };
+}
+/* 纹理／双重画笔的覆盖率合成（c＝笔画覆盖率，s＝纹理或第二支笔尖的值；1＝不挡）——同 tools/mixer.js makeGrain 的各模式 */
+function maskCombine(mode, c, s){
+  let o;
+  switch (mode){
+    case 'subtract':     o = c - (1 - s); break;
+    case 'darken':       o = Math.min(c, s); break;
+    case 'overlay':      o = c < 0.5 ? 2 * c * s : 1 - 2 * (1 - c) * (1 - s); break;
+    case 'colorDodge':   o = c * (s + (1 - s) * c); break;
+    case 'colorBurn':    o = 1 - Math.min(1, (1 - c) / Math.max(s, 1e-3)); break;
+    case 'linearBurn':   o = c + s - 1; break;
+    case 'hardMix':      o = c + s > 1 ? c : 0; break;
+    case 'linearHeight': o = c * c01((s - (1 - c)) / Math.max(c, 1e-3)); break;
+    case 'height':       o = c > 1 - s ? c : 0; break;
+    default:             o = c * s;
+  }
+  return c01(o);
+}
+/* 纹理取样：用混合器画笔那支（tools/mixer.js makeGrain：图案灰度＋亮度／对比度／反相、文件坐标平铺、按模式与深度合成） */
+const grainOf = tx => (tx && tx.enabled && window.MixerBrush && MixerBrush.makeGrain) ? MixerBrush.makeGrain(tx) : null;
+/* 双重画笔的第二支笔：自己的笔尖、大小、间距、散布、数量；平滑跟主笔一样（路径对得上）；种子另起一条 */
+function dualBrushOf(b){
+  const db = b.dualBrush, s = defaultBrush();
+  s.tip = db.tip || ''; s.size = clamp(db.size, 1, SIZE_MAX); s.hardness = c01(db.hardness); s.spacing = clamp(db.spacing, 0.01, 10);
+  s.pressureSize = false; s.texture.enabled = false; s.dualBrush.enabled = false;
+  const sc = clamp(db.scatter, 0, 10), cnt = clamp(Math.round(db.count), 1, 16);
+  s.scattering = { enabled: sc > 0 || cnt > 1, scatter: Object.assign(dyn(), { jitter:sc }), bothAxes: !!db.bothAxes, count:cnt, countJitter:dyn() };
+  if (db.flip){ s.shapeDynamics.enabled = true; s.shapeDynamics.flipXJitter = true; }
+  s.smoothing = clone(b.smoothing); s.spacingEnabled = true; s.buildUp = b.buildUp; s.buildUpRate = b.buildUpRate;
+  s._seed = (b._seed ^ 0x6475616C6272n) & M64;
+  return s;
+}
+
 /* 覆盖率缓冲：{x0,y0,w,h,cov,col}；主缓冲＝整层，尾巴预览用一小块复本（render.rs:496-501 subset） */
 const newBuf = (x0, y0, w, h, withCol) => ({ x0, y0, w, h, cov:new Float32Array(w * h), col: withCol ? new Float32Array(w * h * 3) : null });
 
@@ -527,11 +889,53 @@ class StrokeRenderer {
     this.main = newBuf(0, 0, W, H, this.perDab);
     this.gen = new DabGenerator(b, zoom);
     this.bounds = null; this.dirty = null; this.count = 0; this.record = null;
+    this.tip = b.tip ? BrushTips.get(b.tip) : null;          // 取样笔尖（找不到＝resolveBrush 早就报错了）
+    if (this.tip) BrushTips.doc.add(this.tip.id);            // 用过的笔尖跟着这份档存
+    const tx = b.texture;
+    this.grain = (tx && tx.enabled && !b._noTexture) ? grainOf(tx) : null;
+    this.grainEach = !!(this.grain && tx.eachTip);
+    // 双重画笔：第二支笔自己一个渲染器（同尺寸覆盖率缓冲），合成时照 dualBrush.mode 挡主笔
+    this.sec = (b.dualBrush && b.dualBrush.enabled) ? new StrokeRenderer(dualBrushOf(b), W, H, zoom, ox, oy) : null;
+    this.dualMode = this.sec ? b.dualBrush.mode : null;
+  }
+  /* 这个笔印会碰到的格子：走快取盖印的用盖印外框（取样笔尖斜放时比半径大），其余照 render.rs:144-150 */
+  _useStamp(d){ return !!this.tip || (!this.b.aliased && d.radius >= ROUND_STAMP_R); }
+  _rect(d){ if (!this._useStamp(d)) return dabRect(d); const s = stampFor(d, this.b, this.tip); return [s.x0, s.y0, s.x0 + s.w, s.y0 + s.h]; }
+  /* 快取盖印版的 accumulate：每格只查表（杂讯、湿边、逐笔印纹理照原式加上） */
+  _accumStamp(d, buf){
+    const s = stampFor(d, this.b, this.tip);
+    const r0 = inter([s.x0, s.y0, s.x0 + s.w, s.y0 + s.h], buf.x0, buf.y0, buf.x0 + buf.w, buf.y0 + buf.h);
+    if (!r0) return null;
+    const b = this.b, noise = b.noise, ceil = d.opacity, wetA = s.wet, wet = !!wetA, grain = this.grainEach ? this.grain : null;
+    const cov = buf.cov, col = buf.col, color = d.color, A = s.a, alpha = d.alpha;
+    for (let y = r0[1]; y < r0[3]; y++){
+      const sr = (y - s.y0) * s.w - s.x0, br = (y - buf.y0) * buf.w - buf.x0;
+      for (let x = r0[0]; x < r0[2]; x++){
+        let val = A[sr + x];
+        if (val <= 0) continue;
+        if (noise && val < 1){ const n = hash2(x + this.ox, y + this.oy, NOISE_SALT); val += ((n < val ? 1 : 0) - val) * 0.7; }
+        if (wet) val *= wetA[sr + x];
+        if (grain) val = grain(val, x + this.ox, y + this.oy);
+        const vv = val * alpha;
+        if (vv <= 0) continue;
+        const i = br + x, c = cov[i];
+        const nv = wet ? Math.max(c, vv * ceil) : (ceil > c ? c + vv * (ceil - c) : c);
+        if (nv <= c) continue;
+        if (col){
+          const k = c < 1 ? (nv - c) / (1 - c) : 0, j = i * 3;
+          col[j] = color[0] * k + col[j] * (1 - k); col[j + 1] = color[1] * k + col[j + 1] * (1 - k); col[j + 2] = color[2] * k + col[j + 2] * (1 - k);
+        }
+        cov[i] = nv;
+      }
+    }
+    return r0;
   }
   /* render.rs:153-237 rasterize（圆笔尖）＋ 297-361 accumulate：c ← c + v·(上限 − c)；湿边用 max */
   _accum(d, buf){
+    if (this._useStamp(d)) return this._accumStamp(d, buf);
     const r0 = inter(dabRect(d), buf.x0, buf.y0, buf.x0 + buf.w, buf.y0 + buf.h);
     if (!r0) return null;
+    const grain = this.grainEach ? this.grain : null;
     const b = this.b, aliased = b.aliased, wet = b.wetEdges, noise = b.noise, hard = b.hardness, ceil = d.opacity;
     const [cx, cy] = aliased ? gridCenter(d.cx, d.cy, 2 * d.radius) : [d.cx, d.cy];
     const sn = Math.sin(d.angle), cs = Math.cos(d.angle), fx = d.flipX ? -1 : 1, fy = d.flipY ? -1 : 1;
@@ -553,6 +957,7 @@ class StrokeRenderer {
         if (val <= 0) continue;
         if (noise && val < 1){ const n = hash2(x + this.ox, y + this.oy, NOISE_SALT); val += ((n < val ? 1 : 0) - val) * 0.7; }
         if (wet) val *= 0.5 + 0.5 * smoothstep(0.5, 1, dd / rm);
+        if (grain) val = grain(val, x + this.ox, y + this.oy);   // 纹理「为每个笔尖设置纹理」
         const vv = val * d.alpha;
         if (vv <= 0) continue;
         const i = (y - buf.y0) * buf.w + (x - buf.x0), c = cov[i];
@@ -575,15 +980,17 @@ class StrokeRenderer {
       if (r){ this.bounds = uni(this.bounds, r); this.dirty = uni(this.dirty, r); }
     }
   }
-  push(pts){ const out = []; this.gen.push(pts, out); this._raster(out); }      // render.rs:463-466
-  finish(){ const out = []; this.gen.finish(out); this._raster(out); }          // render.rs:469-472
+  /* 第二支笔（双重画笔）跟着同一批点走；它新盖到的格子也要重合成（主笔早盖过的地方会被它「打开」） */
+  _secSync(){ if (this.sec && this.sec.dirty){ this.dirty = uni(this.dirty, this.sec.dirty); this.sec.dirty = null; } }
+  push(pts){ const out = []; this.gen.push(pts, out); this._raster(out); if (this.sec){ this.sec.push(pts); this._secSync(); } }   // render.rs:463-466
+  finish(){ const out = []; this.gen.finish(out); this._raster(out); if (this.sec){ this.sec.finish(); this._secSync(); } }       // render.rs:469-472
   /* render.rs:474-519 tail_preview：现在收笔会多出的那截（平滑的追赶尾巴、或单独第一点），画进主缓冲的一块复本 */
   tailPreview(){
     const g = this.gen.clone(), out = [];
     g.finish(out);
     if (!out.length) return null;
     let rect = null;
-    for (const d of out){ const r = inter(dabRect(d), 0, 0, this.W, this.H); if (r) rect = uni(rect, r); }
+    for (const d of out){ const r = inter(this._rect(d), 0, 0, this.W, this.H); if (r) rect = uni(rect, r); }
     if (!rect) return null;
     const m = this.main, w = rect[2] - rect[0], h = rect[3] - rect[1], buf = newBuf(rect[0], rect[1], w, h, this.perDab);
     for (let y = 0; y < h; y++){
@@ -604,6 +1011,8 @@ class StrokeRenderer {
     const b = this.b, op = c01(b.opacity), mode = b.mode, erase = b.erase;
     const dissolve = mode === 'dissolve', normal = mode === 'normal' || dissolve;
     const cov = buf.cov, col = this.perDab ? buf.col : null, src = b.color.slice();
+    // 整笔一次的遮罩：双重画笔（第二支笔的覆盖率照模式挡）、纹理（没勾「为每个笔尖设置纹理」＝整笔套一次图案）
+    const dual = this.sec ? this.sec.main.cov : null, dmode = this.dualMode, grain = (this.grain && !this.grainEach) ? this.grain : null;
     for (let y = y0; y < y1; y++){
       const inY = !sel || (y + 0.5 >= sel[1] && y + 0.5 < sel[3]);
       for (let x = x0; x < x1; x++){
@@ -611,8 +1020,11 @@ class StrokeRenderer {
         od[oi] = pd[pi]; od[oi + 1] = pd[pi + 1]; od[oi + 2] = pd[pi + 2]; od[oi + 3] = pd[pi + 3];
         const bi = (y - buf.y0) * buf.w + (x - buf.x0), c = cov[bi];
         if (c <= 0) continue;
+        let cm = c;
+        if (dual){ cm = maskCombine(dmode, cm, dual[y * W + x]); if (cm <= 0) continue; }
+        if (grain){ cm = grain(cm, x + this.ox, y + this.oy); if (cm <= 0) continue; }
         const s = (inY && (!sel || (x + 0.5 >= sel[0] && x + 0.5 < sel[2]))) ? 1 : 0;
-        let k = Math.min(c * op * s, 1);
+        let k = Math.min(cm * op * s, 1);
         if (k <= 0) continue;
         if (dissolve){ k = hash2(x + this.ox, y + this.oy, b._seed) < k ? 1 : 0; if (!k) continue; }
         if (erase){ od[oi + 3] = Math.round(pd[pi + 3] * (1 - k)); continue; }
@@ -987,7 +1399,14 @@ const T = Tools.reg({
     const h = this._hover;
     if (h){
       const cx = h[0] * s, cy = h[1] * s;
-      const r = Math.max(full * (0.5 + 0.5 * c01(ToolState.hardness)), 1);
+      const tip = this.brush.tip ? BrushTips.get(this.brush.tip) : null;
+      // 取样笔尖：游标画笔尖的样子（PS 的「正常画笔笔尖」游标），外加整个直径的圈
+      if (tip && full * dpr > 4){
+        if (!this._tipCur || this._tipCur.id !== tip.id){ this._tipCur = { id:tip.id, c:BrushTips.thumb(tip, 128) }; }
+        ctx.save(); ctx.translate(cx, cy); ctx.rotate(-(this.brush.angle || 0) * Math.PI / 180); ctx.scale(this.brush.flipX ? -1 : 1, (this.brush.flipY ? -1 : 1) * Math.max(this.brush.roundness, 0.01));
+        ctx.globalAlpha = 0.45; ctx.drawImage(this._tipCur.c, -full * dpr, -full * dpr, 2 * full * dpr, 2 * full * dpr); ctx.restore();
+      }
+      const r = tip ? full : Math.max(full * (0.5 + 0.5 * c01(ToolState.hardness)), 1);
       ring(cx, cy, r);
       if (r > 6) cross(cx, cy, 3);
       if (this._shift && !this._drag && this._lastEndValid()){
@@ -1019,6 +1438,8 @@ function resolveBrush(p){
   b.color = parseColor(p.color, fg);
   b.erase = p.erase === true;
   b._seed = seedOf(p);
+  for (const [k, id] of [['tip', b.tip], ['dualBrush.tip', b.dualBrush && b.dualBrush.tip]])   // 笔尖被删了／这台机器没有：说清楚，不偷偷画圆的
+    if (id && !BrushTips.get(id)) return { error: `unknown brush tip \`${id}\` in \`${k}\` (see brush.tips.list; pick another with brush.tips.select)` };
   if (b.erase) b.mode = 'normal';                     // 橡皮擦没有混合模式
   else { const m = modeOf(p.mode); if (m) b.mode = m; }
   return { b, ignored };
@@ -1064,7 +1485,10 @@ CMD.reg('brush.set', {i18n:'',
        + 'flipX, flipY, aliased, shapeDynamics{enabled,size{jitter,control,fadeSteps,minimum},tiltScale,angle{…},roundness{…},flipXJitter,flipYJitter,brushProjection}, '
        + 'scattering{enabled,scatter{…},bothAxes,count,countJitter{…}}, colorDynamics{enabled,perTip,fgBg{…},hueJitter,saturationJitter,brightnessJitter,purity}, '
        + 'transfer{enabled,opacity{…},flow{…}}, pose{enabled,tiltX,tiltY,rotation,pressure,overrideTilt,overrideRotation,overridePressure}, '
-       + 'noise, wetEdges, buildUp, buildUpRate, smoothing{amount,pulledString,catchUp,catchUpOnEnd,adjustForZoom}, seed} '
+       + 'noise, wetEdges, buildUp, buildUpRate, smoothing{amount,pulledString,catchUp,catchUpOnEnd,adjustForZoom}, seed, '
+       + 'tip:取样笔尖 id|名字（""＝圆笔尖；见 brush.tips.list）, '
+       + 'texture{enabled, pattern:图案 id|名字（ps.pattern.list）, invert, scale 0.01..10（1＝100%）, brightness -150..150, contrast -50..100, eachTip, mode:' + TEX_MODES.join('|') + ', depth 0..1}, '
+       + 'dualBrush{enabled, tip:笔尖 id|名字|"", mode:' + DUAL_MODES.join('|') + ', size px, hardness 0..1, spacing 0.01..10, scatter 0..10, bothAxes, count 1..16, flip}} '
        + 'control ∈ off|fade|penPressure|penTilt|stylusWheel|rotation|initialDirection|direction。回传整支笔刷。传 {} 只读'},
   p => {
     let b = T.current();
@@ -1081,6 +1505,7 @@ CMD.reg('brush.set', {i18n:'',
     delete b.size; delete b.hardness; delete b._seed;
     b.color = T.brush.color;                            // 颜色跟前景色走，不存在笔刷里
     T.brush = b;
+    [b.tip, b.dualBrush && b.dualBrush.tip].forEach(id => { if (id) BrushTips.doc.add(id); });   // 选过的取样笔尖跟着这份档存
     T._syncBar();
     if (window.UI && UI.canvas) UI.draw();
     const out = brushJson(T.current()); out.ok = true;
@@ -1093,8 +1518,72 @@ CMD.reg('brush.get', {i18n:'', params:'{} 读整支笔刷现值（含共用的 s
   return out;
 });
 
+/* ═══════════ 取样笔尖命令（画笔面板、定义画笔预设、读入 .abr 都走这几条；agent 同一条路） ═══════════ */
+const tipInfo = t => ({ id:t.id, name:t.name, width:t.width, height:t.height, size:t.size, spacing:t.spacing, source:t.source, inDocument:BrushTips.doc.has(t.id) });
+CMD.reg('brush.tips.list', {i18n:'', params:'{} 取样笔尖清单（内建、本机预设库、这份档带的）→ {ok, current:目前笔刷的笔尖 id|"", tips:[{id,name,width,height,size,spacing,source:"builtin|local|doc",inDocument}]}'},
+  () => ({ ok:true, current:T.brush.tip || '', tips:BrushTips.list().map(tipInfo) }));
+CMD.reg('brush.tips.select', {i18n:'', params:'{tip:id|名字（""＝回圆笔尖）, size?:px（缺省＝笔尖原大小）, spacing?:0.01..10（缺省＝笔尖自带的）} 笔刷换成这支笔尖（PS 画笔笔尖形状点一支）→ 整支笔刷'}, p => {
+  if (typeof p.tip !== 'string') return {ok:false, error:'missing `tip` (an id or name from brush.tips.list, or "" for the round tip)'};
+  if (!p.tip) return CMD.run('brush.set', { tip:'' });
+  const t = BrushTips.get(p.tip); if (!t) return {ok:false, error:`unknown brush tip \`${p.tip}\` (see brush.tips.list)`};
+  return CMD.run('brush.set', { tip:t.id, size: clamp(Math.round(isNum(p.size) ? p.size : t.size), SIZE_MIN, SIZE_MAX), spacing: isNum(p.spacing) ? clamp(p.spacing, 0.01, 10) : t.spacing });
+});
+/* 新增一支（定义画笔预设：menus/impl/ps-edit.js 算好灰阶后叫这条）：alpha＝base64 的 width×height 位元组（0..255，255＝满） */
+CMD.reg('brush.tips.add', {i18n:'', params:'{name, width, height, alpha:base64（width×height 个 0..255，255＝满颜料）, size?, spacing?=0.25, select?=true, local?=true（存进本机预设库）} 新增取样笔尖（也跟这份档存）→ {ok, tip, saved, selected}'}, p => {
+  const w = p.width | 0, h = p.height | 0;
+  if (!(w > 0 && h > 0)) return {ok:false, error:'`width` and `height` must be positive'};
+  let a = p.alpha instanceof Uint8Array ? p.alpha : null;
+  if (!a && typeof p.alpha === 'string'){ try { a = b64dec(p.alpha); } catch (e){ return {ok:false, error:'`alpha` is not valid base64'}; } }
+  if (!a || a.length !== w * h) return {ok:false, error:`\`alpha\` must be ${w}×${h} = ${w * h} bytes`};
+  if (!a.some(v => v > 0)) return {ok:false, error:'the brush tip is empty (all alpha 0)'};
+  const r = BrushTips.add({ name: typeof p.name === 'string' && p.name.trim() ? p.name.trim() : 'Sampled Brush', width:w, height:h, a, size:p.size, spacing:p.spacing }, { local: p.local !== false });
+  let selected = false;
+  if (p.select !== false){ const s = CMD.run('brush.tips.select', { tip:r.tip.id }); selected = !!(s && s.ok); }
+  const out = { ok:true, tip:tipInfo(r.tip), saved:r.saved, selected };
+  if (r.scaled) out.note = `scaled down to ${r.tip.width}×${r.tip.height} (brush tips are limited to ${TIP_MAX} px)`;
+  if (r.saved === false) out.warning = 'the browser storage is full: the tip was not added to the local preset library (it is still kept in this document)';
+  return out;
+});
+CMD.reg('brush.tips.importAbr', {i18n:'', params:'{data:base64（.abr 档的内容）, name?:档名（没名字的笔尖叫「档名 N」）, select?:bool=true（选第一支）} 读入 Photoshop 画笔档 .abr（v6／v10 的取样笔尖；v1／v2 旧档、只有计算笔尖的档回清楚的错误）→ {ok, version, imported:[{id,name,width,height}], skipped:[…]}'}, p => {
+  let u8 = p.bytes instanceof Uint8Array ? p.bytes : (p.bytes instanceof ArrayBuffer ? new Uint8Array(p.bytes) : null);
+  if (!u8){ if (typeof p.data !== 'string' || !p.data) return {ok:false, error:'missing `data` (the .abr file as base64)'};
+    try { u8 = b64dec(p.data.replace(/^data:[^,]*,/, '')); } catch (e){ return {ok:false, error:'`data` is not valid base64'}; } }
+  const base = String(p.name || 'ABR').replace(/\.abr$/i, '');
+  let r; try { r = parseAbr(u8, base); } catch (e){ return {ok:false, error:e.message}; }
+  if (!r.tips.length) return {ok:false, error:'no usable sampled brush tips in this .abr', version:r.version, skipped:r.skipped};
+  const imported = []; let full = false, scaled = 0;
+  for (const t of r.tips){ const x = BrushTips.add(t); if (x.saved === false) full = true; if (x.scaled) scaled++; imported.push(tipInfo(x.tip)); }
+  if (p.select !== false) CMD.run('brush.tips.select', { tip:imported[0].id });
+  const out = { ok:true, version:r.version, imported, skipped:r.skipped };
+  if (scaled) out.note = `${scaled} tip(s) scaled down to ${TIP_MAX} px`;
+  if (full) out.warning = 'the browser storage is full: some tips were not added to the local preset library (they are still kept in this document)';
+  return out;
+});
+CMD.reg('brush.tips.edit', {i18n:'', params:'{action:"rename|delete", tip:id|名字, name?} 改名／删除自己的取样笔尖（内建的不能改；删掉的若正在用＝笔刷回圆笔尖）→ {ok}'}, p => {
+  try {
+    if (p.action === 'rename'){ const n = String(p.name || '').trim(); if (!n) return {ok:false, error:'missing `name`'}; const t = BrushTips.rename(p.tip, n); return t ? {ok:true, tip:tipInfo(t)} : {ok:false, error:`unknown brush tip \`${p.tip}\``}; }
+    if (p.action === 'delete'){
+      const t = BrushTips.remove(p.tip); if (!t) return {ok:false, error:`unknown brush tip \`${p.tip}\``};
+      if (T.brush.tip === t.id) T.brush.tip = '';
+      if (T.brush.dualBrush && T.brush.dualBrush.tip === t.id) T.brush.dualBrush.tip = '';
+      T._syncBar(); return {ok:true, deleted:t.id};
+    }
+  } catch (e){ return {ok:false, error:e.message}; }
+  return {ok:false, error:'`action` must be rename or delete'};
+});
+
+/* 工程档：用过／定义过／读入过的取样笔尖存进 project.json 的 brushTips（别台机器开这份档，笔刷预设照样画得出来） */
+if (window.Project && !Project.__brushTips){
+  Project.__brushTips = true;
+  const ser0 = Project.serialize, load0 = Project.load;
+  Project.serialize = function(){ const o = ser0.apply(this, arguments); if (o && !Array.isArray(o) && BrushTips.doc.size){ const t = BrushTips.serialize(); if (t.length) o.brushTips = t; } return o; };
+  Project.load = function(json){ BrushTips.loadDoc(json && json.brushTips); return load0.apply(this, arguments); };
+}
+window.BrushTips = BrushTips;
+
 /* 给自测与 agent 用的纯函数（不改文件） */
 T._engine = { dabCoverage, parsePoints, StrokeRenderer, mergeBrush, defaultBrush, blendChannel, rand01, seedFromBytes,
-              DabGenerator, mkPt, seedOf, scalar, ST };   // 混合器画笔借笔尖形状／形状动态（tools/mixer.js tipDabs）
+              DabGenerator, mkPt, seedOf, scalar, ST,   // 混合器画笔借笔尖形状／形状动态（tools/mixer.js tipDabs）
+              parseAbr, packBitsEncode, packBitsDecode, stampFor, StampCache, maskCombine, BrushTips, TEX_MODES, DUAL_MODES };
 
 })();

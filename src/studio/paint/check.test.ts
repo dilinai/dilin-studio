@@ -1,7 +1,8 @@
 /** Dilin Studio · Paint — project.check.json tests (what the engine cannot read).
  *  Run (from the studio root): node -e "require('sucrase/register/ts');require('./paint/check.test.ts')"
  *  Negative controls (each must turn a test red): SHAPES loses "path" ⇒ C1; the slip table loses "fontSize" ⇒ C3;
- *  checkPage stops checking assets ⇒ C4; guest-api stops writing the report ⇒ C6. */
+ *  checkPage stops checking assets ⇒ C4; guest-api stops writing the report ⇒ C6;
+ *  a language of ai-brief or FORMAT.md loses the "change words via data.text, don't type on the canvas" line ⇒ C8. */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -99,6 +100,14 @@ ok('C7 FORMAT.md and the checker use the same shape table: every shape type the 
     assert.ok(line, `FORMAT.md has no line for shape "${type}"`)
     for (const k of s.need) assert.ok(line!.includes(`"${k}"`), `FORMAT.md line for "${type}" misses "${k}"`)
   }
+})
+
+ok('C8 all three languages and FORMAT.md say: change words by editing the text layer data.text, do not type on the web canvas', () => {
+  const { paintFormatNotes } = require('./ai-brief') as typeof import('./ai-brief')
+  const want = { 'zh-TW': /改字：直接改那個文字層 data 的 text[^\n]*別在網頁畫布上用滑鼠點文字工具再打字/, 'zh-CN': /改字：直接改那个文字层 data 的 text[^\n]*别在网页画布上用鼠标点文字工具再打字/, en: /edit that text layer's data\.text[^\n]*Do not click the text tool on the web canvas and type/ } as const
+  for (const [lang, re] of Object.entries(want)) assert.match(paintFormatNotes(lang as keyof typeof want), re, lang)
+  const fmt = readFileSync(join(__dirname, 'FORMAT.md'), 'utf8').replace(/\s+/g, ' ')
+  assert.match(fmt, /edit its `data\.text`.*Do not click the text tool on the web canvas and type/)
 })
 
 void (async () => {

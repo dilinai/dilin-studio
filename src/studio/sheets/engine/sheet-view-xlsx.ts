@@ -78,6 +78,7 @@ export function sheetViewXmlParts(content: ViewContent): SheetViewXml {
     autoFilter = `<autoFilter ref="${filterRef}">${cols.map(x => `<filterColumn colId="${x.id}">${criterionXml(x.c)}</filterColumn>`).join('')}</autoFilter>`
     hidden = filteredRows(content)
   }
+  for (const r of content.hiddenRows ?? []) hidden.add(r)   // 手动隐藏的行也写 hidden（Excel 读回来照藏）
   const vs = content.validations ?? []
   const dataValidations = vs.length ? `<dataValidations count="${vs.length}">${vs.map(validationXml).join('')}</dataValidations>` : ''
   return { sheetViews, autoFilter, dataValidations, hidden, filterRef }

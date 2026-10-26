@@ -10,6 +10,7 @@
 
 import type { ComponentType, ReactNode } from 'react'
 import type { EditorProps } from './types'
+import type { InlineBox } from './inline-box'
 
 export type StudioHostKind = 'site' | 'guest'
 
@@ -23,6 +24,8 @@ export interface ChatSlotOptions {
   title?: string
   titleIcon?: ReactNode
   headerExtra?: ReactNode
+  /** 游客版：右栏底下那个能插小卡的输入框（编辑器 Alt+A 插卡用·./inline-box.ts）；不给 ⇒ 不画。登入版不用 */
+  inlineBox?: InlineBox
 }
 
 export interface HomeBrandOptions {

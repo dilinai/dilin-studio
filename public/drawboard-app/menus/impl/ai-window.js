@@ -1789,12 +1789,26 @@ reg('ai.gradient.setMidpoint', '{index（左边那个色标）, location: 13..87
 P.define('aiGradient', {title:L3('漸層', '渐变', 'Gradient'), w:280,
   refresh(b, _a, why){ if (busy(b, why)) return;
     b.innerHTML = ''; const g = peek('gradient.get', {stroke:activeStroke()}), ok = g && g.ok !== false && g.paint, {n} = selInfo();
+    const ffg = activeStroke() ? null : peek('gradient.freeform.get', {}), ff = ffg && ffg.ok !== false ? ffg : null;   // 任意形状渐变（只给填色）
     const stops = ok ? stopsOf(g) : []; if (GP.stop >= stops.length) GP.stop = Math.max(0, stops.length - 1);
-    const kind = ok ? (g.paint.kind || 'linear') : null, ramp = stops.length ? `linear-gradient(90deg,${stops.map(s => { const [r, gg, bb] = hexRgb(s.color); return `rgba(${r},${gg},${bb},${s.opacity}) ${Math.round(s.offset * 100)}%`; }).join(',')})` : 'linear-gradient(90deg,#fff,#000)';
+    const kind = ff ? 'freeform' : ok ? (g.paint.kind || 'linear') : null, ramp = stops.length ? `linear-gradient(90deg,${stops.map(s => { const [r, gg, bb] = hexRgb(s.color); return `rgba(${r},${gg},${bb},${s.opacity}) ${Math.round(s.offset * 100)}%`; }).join(',')})` : 'linear-gradient(90deg,#fff,#000)';
     b.appendChild(el('div', {class:'row'}, [el('div', {style:`width:34px;height:34px;border:1px solid #000;background:${ramp}`}),
       el('div', {}, [row(L3('類型：', '类型：', 'Type:'), ...[['linear', '▭', L3('線性', '线性', 'Linear')], ['radial', '◎', L3('放射狀', '径向', 'Radial')]].map(([k, ic, nm]) => btn(ic, nm, () => runCmd('gradient.edit', {kind:k, stroke:activeStroke()}), {disabled:!n, class:kind === k ? 'on' : '', dataset:{kind:k}})),
-        btn('◇', L3('任意形狀漸層（未做：engine 的 GradientFill 沒有任意形狀種類）', '任意形状渐变（未做：engine 的 GradientFill 没有任意形状种类）', 'Freeform (not done: no freeform kind in GradientFill)'), null, {disabled:true, dataset:{kind:'freeform'}})),
+        btn('◇', L3('任意形狀漸層', '任意形状渐变', 'Freeform Gradient'), () => runCmd('gradient.freeform.apply', {}), {disabled:!n || activeStroke(), class:kind === 'freeform' ? 'on' : '', dataset:{kind:'freeform'}})),
         row(L3('筆畫：', '描边：', 'Stroke:'), btn(activeStroke() ? T(L3('筆畫', '描边', 'Stroke')) : T(L3('填色', '填色', 'Fill')), L3('填色／筆畫（作用中的色塊）', '填色／描边（作用中的色块）', 'Fill / Stroke proxy'), () => { if (window.Toolbar){ Toolbar.activeSwatch = activeStroke() ? 'fill' : 'stroke'; if (Toolbar.refreshColors) Toolbar.refreshColors(); } P.refresh('aiGradient'); }, {dataset:{act:'proxy'}}))])]));
+    if (ff){                                              // 任意形状：「绘制：点／线」、选中色标点的颜色／不透明度／扩展（AI 渐变面板同一格）
+      const sel = ff.selectedPoint, pt = sel !== null && sel !== undefined ? ff.points[sel] : null;
+      b.appendChild(row(L3('繪製：', '绘制：', 'Draw:'), ...[['points', L3('點', '点', 'Points')], ['lines', L3('線', '线', 'Lines')]].map(([k, nm]) => btn(T(nm), nm, () => runCmd('gradient.freeform.setMode', {mode:k}), {class:ff.mode === k ? 'on' : '', dataset:{ffmode:k}}))));
+      if (pt){
+        const c = el('input', {type:'color', value:pt.color, dataset:{k:'ffColor'}}); c.onchange = () => runCmd('gradient.freeform.setPoint', {index:sel, color:c.value});
+        const op = el('input', {type:'number', min:0, max:100, value:Math.round(pt.opacity), dataset:{k:'ffOpacity'}}); op.onchange = () => runCmd('gradient.freeform.setPoint', {index:sel, opacity:+op.value});
+        const sp = el('input', {type:'number', min:0, max:100, value:Math.round(pt.spread), dataset:{k:'ffSpread'}}); sp.onchange = () => runCmd('gradient.freeform.setPoint', {index:sel, spread:+sp.value});
+        b.appendChild(row(L3('色標：', '色标：', 'Stop:'), c, el('span', {text:T(L3('不透明度：', '不透明度：', 'Opacity:'))}), op, el('span', {text:'%'})));
+        b.appendChild(row(L3('展開：', '扩展：', 'Spread:'), sp, el('span', {text:'%'}), btn('🗑', L3('刪除色標', '删除色标', 'Delete Stop'), () => runCmd('gradient.freeform.deletePoint', {index:sel}), {disabled:ff.points.length <= 1, dataset:{act:'ffDelete'}})));
+      }
+      b.appendChild(el('div', {class:'hint', text:T(L3('用漸層工具：拖色標點移動、在物件內按一下加點、Alt＋按一下刪點', '用渐变工具：拖色标点移动、在物件内单击加点、Alt＋单击删点', 'With the Gradient tool: drag a stop to move it, click inside the art to add one, Alt-click to remove it'))}));
+      return;
+    }
     if (!HO.aiGradient){
       const ang = el('input', {type:'number', min:-180, max:180, value:ok && g.angle !== undefined ? Math.round(g.angle) : 0, disabled:!ok, dataset:{k:'angle'}}); ang.onchange = () => runCmd('gradient.edit', {angle:+ang.value, stroke:activeStroke()});
       b.appendChild(row(L3('角度：', '角度：', 'Angle:'), ang, el('span', {text:'°'}), btn('⇄', L3('反轉漸層', '反向渐变', 'Reverse Gradient'), () => runCmd('gradient.edit', {reverse:true, stroke:activeStroke()}), {disabled:!ok, dataset:{act:'reverse'}})));

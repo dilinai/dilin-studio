@@ -20,7 +20,8 @@ export const SHEET_CONTENT_MAX_BYTES = 2 * 1024 * 1024
 const fail = (error: string, message: string): SheetsAgentOut => ({ reply: { ok: false, error, message } })
 const tabList = (doc: SheetsDoc) => doc.sheets.map((t, i) => ({ id: t.id, name: t.name, position: i }))
 
-function pick(doc: SheetsDoc, want: string | null): SheetsTab | string {
+/** 表名或 id ⇒ 那张表（缺省第一张）；找不到、同名多张 ⇒ 回说明字串（命令列版 cli-core 也用） */
+export function pickSheet(doc: SheetsDoc, want: string | null): SheetsTab | string {
   if (!doc.sheets.length) return 'the project has no sheets'
   if (!want) return doc.sheets[0]
   const w = want.trim()
@@ -39,7 +40,7 @@ export function sheetsAgentJob(doc: SheetsDoc, job: { kind?: unknown; sheet?: un
     const range = typeof job.range === 'string' && job.range.trim() ? job.range.trim() : null
     const named = range && range.includes('!') ? range.slice(0, range.lastIndexOf('!')).replace(/^'(.*)'$/, '$1') : null
     if (named && sheetIn && named.toLowerCase() !== sheetIn.toLowerCase()) return fail('bad_params', `range names sheet "${named}" but sheet is "${sheetIn}"`)
-    const tab = pick(doc, sheetIn ?? named)
+    const tab = pickSheet(doc, sheetIn ?? named)
     if (typeof tab === 'string') return fail('bad_params', tab)
     try {
       const r = readRange(tab.content as AgentContent, {
@@ -62,7 +63,7 @@ export function sheetsAgentJob(doc: SheetsDoc, job: { kind?: unknown; sheet?: un
   const named = opSheetNames(ops)
   if (named.length > 1) return fail('bad_params', 'all ops must target the same sheet (one call edits one sheet)')
   if (named.length === 1 && sheetIn && named[0].toLowerCase() !== sheetIn.toLowerCase() && !doc.sheets.some((t) => t.id === sheetIn && t.name.toLowerCase() === named[0].toLowerCase())) return fail('bad_params', `ops name sheet "${named[0]}" but sheet is "${sheetIn}"`)
-  const tab = pick(doc, sheetIn ?? named[0] ?? null)
+  const tab = pickSheet(doc, sheetIn ?? named[0] ?? null)
   if (typeof tab === 'string') return fail('bad_params', tab)
   const opsIn = ops.map((o) => (o && typeof o === 'object' && typeof (o as { range?: unknown }).range === 'string')
     ? { ...(o as Record<string, unknown>), range: (o as { range: string }).range.replace(/^.*!/, '') }

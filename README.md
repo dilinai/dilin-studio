@@ -1,6 +1,6 @@
-# Dilin Studio 1.3.33
+# Dilin Studio 1.3.35
 
-免登入的五個編輯器——文件、表格、簡報、剪輯、畫板——整個在你自己的瀏覽器裡跑。跟 https://dilinai.com/studio 是同一份程式碼：版本號一樣就完全一樣（來源提交 `c97c2f6a7`，`src/studio/` 底下每個檔都跟網站那一版逐字相同）。
+免登入的五個編輯器——文件、表格、簡報、剪輯、畫板——整個在你自己的瀏覽器裡跑。跟 https://dilinai.com/studio 是同一份程式碼：版本號一樣就完全一樣（來源提交 `b88979a68`，`src/studio/` 底下每個檔都跟網站那一版逐字相同）。
 
 Five editors (docs, sheets, slides, video, paint) that run entirely in your browser — the same code as the editors on https://dilinai.com. AI agents: read [AGENTS.md](AGENTS.md).
 
@@ -95,6 +95,20 @@ Five editors (docs, sheets, slides, video, paint) that run entirely in your brow
 
 要先 `npm run build`（會多打一支 `app/video-cli-core.mjs`）。配音、網頁截圖、音效、加素材檔要在網站上做。
 
+### 表格命令列版（不開瀏覽器）
+
+`node tools/sheets-cli.mjs` 直接對表格工程資料夾（project.json＋assets/）做事，跟表格頁同一套程式（公式、格式、xlsx／csv 讀寫都一樣）：
+
+- `check <工程>`：讀檔報告，表格頁開檔時會丟掉或改掉的每一條都列出來（格名不對、`v` 不是字串、顏色寫錯、認不得的鍵、重複的 id……），有問題退出碼 1。
+- `get <工程> [--sheet 表名] [--range A1:D10] [--formats]`：印出格子（JSON：`input` 原文或公式、`value` 算出來的值、`display` 格子裡顯示的字），公式算好，跨表引用（`Sheet1!B4`）也算得出。
+- `set <工程> --range A1 --values '[["品項","金額"],["房租",12000],["合計","=SUM(B2:B2)"]]'`（或 `--file values.json`）：寫值與公式（`=` 開頭是公式），重算後寫回 project.json，印出寫進去那塊算好的值。
+- `run <工程> --steps steps.json`：照步驟跑表格操作（每步 `{"op":…}`，同 MCP 的 `sheets_run`：`set`、`format`、`insert_rows`、`merge`、`sort`、`resize`、`set_chart`、`cond_format`、`freeze`、`filter`、`validate`……；每步可帶 `"sheet"` 指哪張表），全有或全無，成了寫回 project.json。
+- `commands [--filter 字]`：列操作、參數與例子。
+- `export <工程> --format xlsx|csv [--sheet 表名] [--out 檔或資料夾]`：xlsx 是整份（公式帶算好的值，`assets/` 裡的 png／jpeg／gif 圖一起放進去）；csv 是一張表（缺省第一張）畫面上看到的值。
+- `import <檔.xlsx|.xls|.csv> [--out 新工程資料夾] [--values-only]`：讀成一份新的表格工程（缺省放在檔案旁邊「<名>-dilin」），圖拷進 `assets/`。
+
+Windows 的 PowerShell 會吃掉 `--values`／`--step` 裡 JSON 的引號，請把值寫進 `values.json` 用 `--file`、步驟寫進 `steps.json` 用 `--steps`。要先 `npm run build`（會多打一支 `app/sheets-cli-core.mjs`）。插雲端硬碟裡的圖（`add_image`）要在網站上做。
+
 ### 不開畫面跑畫板（命令列版）
 
 `tools/paint-cli.mjs` 用這台電腦的 Chrome、Edge 或 Chromium 在背景開一頁畫板（看不到視窗），跑的是同一套引擎和命令：
@@ -114,6 +128,32 @@ Windows 的 PowerShell 會吃掉 `--step` 裡 JSON 的引號，建議把步驟�
 - `--out`：`.psd`（分層）、`.psb`（分層大型文件）、`.ai`（分層 Illustrator）、`.ora`（分層 OpenRaster）、`.png`，或一個資料夾（存 `project.json`＋`assets/`）。
 - `serve`：不開畫面，只把 MCP 開在 `http://localhost:41731/mcp` 給 AI 用，按 Ctrl+C 停。
 - 找不到瀏覽器時用 `--chrome <執行檔>` 指定。
+
+### 文件命令列版
+
+`node tools/docs-cli.mjs` 直接對文件工程資料夾（project.json＋assets/）做事，跟文件頁同一套程式：
+
+- `check <工程>`：讀檔報告，文件頁開檔時會丟掉或改回預設的（紙張寫錯、自由組件欄位不對、id 重複），和 `assets/` 裡找不到的圖檔都列出來，有問題退出碼 1。
+- `read <工程> [--offset 字數] [--limit 字數]`：印出正文 markdown 與紙張設定（同 MCP 的 `docs_read`）。
+- `run <工程> --steps steps.json`（或 `--step '{"append":"## 新的一節"}'`）：改正文，同 MCP 的 `docs_edit`——`{"append": …}` 接在最後、`{"old_text": …, "new_text": …}` 換掉正文裡唯一的一段、`{"name": …}` 改文件名；全有或全無，成了寫回 project.json（`--out 資料夾` 另存）。
+- `commands [--filter 字]`：列這三種步驟怎麼寫。
+- `export <工程> --format md|docx|pdf [--out 檔或資料夾]`：缺省存進工程資料夾、檔名＝文件名。
+  - `md`：正文原文（同文件頁「Markdown」；文字方塊等自由組件不在 Markdown 裡），不開瀏覽器。
+  - `docx`、`pdf`：要排版，會用這台電腦的 Chrome、Edge 或 Chromium 在背景開一頁文件頁（看不到視窗）做。Word 跟文件頁「Word」那顆同一條；PDF 是紙張檢視的「列印」，紙張、邊距、頁碼都照工程設定。工程的紙張是「不分頁」（`paper` 是 `null`）時文件頁沒有列印，這裡也不出 PDF。
+  - 每頁存成 PNG：文件頁本身沒有這種匯出，這裡也不做。
+
+### 簡報命令列版
+
+`node tools/slides-cli.mjs` 直接對簡報工程資料夾做事，跟簡報頁同一套程式：
+
+- `check <工程>`：讀檔報告，簡報頁開檔時會丟掉的元件、背景、切換效果，版式和頁型對不上會改成空白頁的頁，和 `assets/` 裡找不到的檔都列出來，有問題退出碼 1。
+- `read <工程> [--page 頁碼]`：頁清單；給 `--page`（從 1 起）再列那一頁的元件（座標、疊放順序）、可用版式和動畫（同 MCP 的 `slides_read`）。
+- `run <工程> --steps steps.json`：跑元件和頁的操作，同 MCP 的 `slides_run`（改字、移框、加刪元件、組合、動畫、加頁、移頁、換版式、切換效果；頁從 0 起算）。全有或全無，成了寫回 project.json。
+- `commands [--filter 字]`：列每種操作和參數、附例子。
+- `export <工程> --format html|pptx [--out 檔或資料夾]`：網頁版簡報、PowerPoint，跟簡報頁「html」「pptx」那兩顆同一條；要量字、烤圖，會在背景開一頁簡報頁做（同上，要有 Chrome、Edge 或 Chromium）。
+  - PDF、每頁 PNG：簡報頁本身沒有這兩種匯出，這裡也不做。
+
+兩支都要先 `npm run build`（會多打 `app/docs-cli-core.mjs`、`app/slides-cli-core.mjs`）。Windows 的 PowerShell 會吃掉 `--step` 裡 JSON 的引號，請把步驟寫進 `steps.json` 用 `--steps`。開瀏覽器的那幾種匯出：找不到瀏覽器時用 `--chrome <執行檔>` 指定；`--port` 換本機小服務的埠（文件缺省 41732、簡報 41733）；`--timeout` 改等待秒數。
 
 ## 網路連線說明
 
@@ -157,4 +197,4 @@ aarch64-linux-gnu-gcc -static -Os -s -o start-linux-arm64 tools/launcher/start-l
 
 ## 版本
 
-`studio-oss.json`：版本（{"base":"1.3.33","docs":"1.3.28","sheets":"1.4.5","slides":"1.3.27","video":"1.3.34","paint":"1.3.41"}）、來源提交、每個檔的雜湊。
+`studio-oss.json`：版本（{"base":"1.3.35","docs":"1.3.29","sheets":"1.4.8","slides":"1.3.28","video":"1.3.40","paint":"1.3.49"}）、來源提交、每個檔的雜湊。

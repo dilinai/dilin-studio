@@ -6,6 +6,7 @@
 import { MIN_CLIP, SPEED_MAX, SPEED_MIN, clipGain, findClip, snapFrame, speedOf, srcAt, timeOfSrc, type Lane, type LayerState, type TextAnim, type TextAnimSet, type TextAnimSlot, type TlClip, type Tracks } from './timeline.pure'
 import { ANIM_DUR, ANIM_LIB, ANIM_SLOTS, POSE_IDLE, parseTextAnim, textAnimPose, type AnimDef, type AnimPose } from './text-anim.pure'
 import { KF_ADJ_KEYS, KF_MASK_KEYS, KF_PIN_KEYS, kfApply, kfEaseAt, kfIndexAt, kfSetEase, kfTimes, kfToggle, kfValue, normalizeKf, type KfEase, type KfProp, type KfTracks } from './keyframe.pure'
+import { kfExpr } from './expr.pure' // 表达式
 import { curveAvg, normCurve, type SpeedCurve } from './curve-speed.pure'
 import type { Mosaic } from './mosaic.pure' // 追踪打码
 import type { ClipFollow, MTrack } from './motion-track.pure' // 运动跟踪
@@ -186,8 +187,9 @@ export const cropClipPath = (fr: { x: number; y: number; w: number; h: number },
   const rr = corner > 0 ? cornerPx(corner, b.w * aspect, b.h) : 0 // 以画面高为 1
   return `inset(${p(b.y)} ${p(1 - b.x - b.w)} ${p(1 - b.y - b.h)} ${p(b.x)}${rr > 0 ? ` round ${p(rr / aspect)} / ${p(rr)}` : ''})`
 }
-type KfClip = Pick<TlClip, 'look'> & Partial<Pick<TlClip, 'kf' | 'start' | 'length' | 'offset' | 'speed' | 'curve'>>
-/** 画面属性（缺的补缺省）；给了 t（时间轴第几秒）且有关键帧 ⇒ 打过关键帧的那几项换成 t 那一刻的值（预览、汇出、面板同一份） */
+type KfClip = Pick<TlClip, 'look'> & Partial<Pick<TlClip, 'kf' | 'start' | 'length' | 'offset' | 'speed' | 'curve' | 'id' | 'expr'>>
+/** 画面属性（缺的补缺省）；给了 t（时间轴第几秒）且有关键帧 ⇒ 打过关键帧的那几项换成 t 那一刻的值（预览、汇出、面板同一份）；
+ *  挂了表达式的项 ⇒ 再过表达式（expr.pure kfExpr·出错回关键帧值） */
 export const lookOf = (c: KfClip, t?: number) => {
   const l = c.look ?? {}
   const o = { sx: l.sx ?? 1, sy: l.sy ?? 1, uniform: l.uniform !== false, x: l.x ?? 0, y: l.y ?? 0, rot: l.rot ?? 0, blend: l.blend ?? 'normal', opacity: l.opacity ?? 1, mask: (masksOfLook(l)[0] ?? null) as ClipMask | null, masks: masksOfLook(l) as ClipMask[], maskOp: (l.maskOp ?? 'and') as MaskOp, matte: maskMatteNegOff() ? null : l.matte ?? null as ClipMatte | null, adj: l.adj ?? {} as ClipAdjust,
@@ -195,15 +197,15 @@ export const lookOf = (c: KfClip, t?: number) => {
     hsl: l.hsl ?? null as ClipHsl | null, curves: l.curves ?? null as ClipCurves | null, wheels: l.wheels ?? null as ClipWheels | null, lut: l.lut ?? null as ClipLut | null, key: l.key ?? null as ClipKey | null,
     corner: l.corner ?? 0, shadow: l.shadow ?? null as ClipShadow | null, pin: l.pin ? { ...l.pin } : null as ClipPin | null,
     glow: l.glow ?? null as ClipGlow | null, border: l.border ?? null as ClipBorder | null, rot3d: l.rot3d ?? null as ClipRot3d | null }
-  const kf = c.kf
-  if (t === undefined || !kf) return o
+  if (t === undefined || (!c.kf && !c.expr)) return o
+  const kf: KfTracks = c.kf ?? {}, ex = c.expr ?? {}
   const s = kfSrc(c, t)
-  const V = (p: KfProp, b: number) => kfValue(kf[p], s, b)
+  const V = (p: KfProp, b: number) => (ex[p] ? kfExpr(c, p, t, s, b) : kfValue(kf[p], s, b))
   o.sx = clamp(V('sx', o.sx), SCALE_MIN, SCALE_MAX); o.sy = clamp(V('sy', o.sy), SCALE_MIN, SCALE_MAX)
   if (o.uniform) o.sy = o.sx
   o.x = V('x', o.x); o.y = V('y', o.y); o.rot = V('rot', o.rot); o.opacity = clamp(V('opacity', o.opacity), 0, 1)
-  if (o.mask) { const m = { ...o.mask }; for (const k of KF_MASK_KEYS) { const b = m[k]; if (b !== undefined || kf[`mask.${k}`]) m[k] = V(`mask.${k}`, b ?? 0) } if (m.progress !== undefined) m.progress = clamp(m.progress, 0, 1); o.mask = m; o.masks = [m, ...o.masks.slice(1)] } // 关键帧管第一个蒙版
-  if (KF_ADJ_KEYS.some((k) => kf[`adj.${k}`])) { const a: ClipAdjust = { ...o.adj }; for (const k of KF_ADJ_KEYS) { const [lo, hi] = adjRange(k); const v = clamp(V(`adj.${k}`, a[k] ?? 0), lo, hi); if (v) a[k] = v; else delete a[k] } o.adj = a }
+  if (o.mask) { const m = { ...o.mask }; for (const k of KF_MASK_KEYS) { const b = m[k]; if (b !== undefined || kf[`mask.${k}`] || ex[`mask.${k}`]) m[k] = V(`mask.${k}`, b ?? 0) } if (m.progress !== undefined) m.progress = clamp(m.progress, 0, 1); o.mask = m; o.masks = [m, ...o.masks.slice(1)] } // 关键帧管第一个蒙版
+  if (KF_ADJ_KEYS.some((k) => kf[`adj.${k}`] || ex[`adj.${k}`])) { const a: ClipAdjust = { ...o.adj }; for (const k of KF_ADJ_KEYS) { const [lo, hi] = adjRange(k); const v = clamp(V(`adj.${k}`, a[k] ?? 0), lo, hi); if (v) a[k] = v; else delete a[k] } o.adj = a }
   if (o.pin) { const pn = o.pin; for (const k of KF_PIN_KEYS) pn[k] = V(`pin.${k}`, pn[k]) }
   return o
 }
@@ -213,8 +215,9 @@ const kfSrc = (c: Partial<Pick<TlClip, 'start' | 'length' | 'offset' | 'speed' |
 
 // ── 音量关键帧（存 dB·剪映音量也照 dB 走）──
 /** 时间轴第 t 秒这段的音量倍数（有音量关键帧 ⇒ 照关键帧·不含淡入淡出） */
-export function gainAt(c: Pick<TlClip, 'volume' | 'kf' | 'start' | 'length' | 'offset' | 'speed' | 'curve'>, t: number): number {
+export function gainAt(c: Pick<TlClip, 'volume' | 'kf' | 'start' | 'length' | 'offset' | 'speed' | 'curve'> & Partial<Pick<TlClip, 'id' | 'expr'>>, t: number): number {
   const tr = c.kf?.vol
+  if (c.expr?.vol) return dbToVol(kfExpr(c, 'vol', t, kfSrc(c, t), volToDb(clipGain(c))))
   if (!tr?.length) return clipGain(c)
   return dbToVol(kfValue(tr, kfSrc(c, t), volToDb(clipGain(c))))
 }
@@ -546,7 +549,7 @@ export function patchClips(tr: Tracks, ids: readonly string[], p: ClipPatch, can
   const want = new Set(ids)
   let out = tr.map((l) => {
     let hit = false
-    const clips = l.clips.map((c) => { if (!want.has(c.id) || (!c.mediaId && !c.adjust && !((p.look?.pin !== undefined || p.follow !== undefined) && (c.text || c.sticker)))) return c; hit = true; return applyClipPatch(c, p, l.kind) })
+    const clips = l.clips.map((c) => { if (!want.has(c.id) || (!c.mediaId && !c.comp && !c.adjust && !((p.look?.pin !== undefined || p.follow !== undefined) && (c.text || c.sticker)))) return c; hit = true; return applyClipPatch(c, p, l.kind) })
     return hit ? { ...l, clips } : l
   })
   if (p.speed !== undefined) for (const id of ids) { const f = findClip(out, id); if (f && canSpeed(f.clip)) out = setClipSpeed(out, id, p.speed) }
@@ -565,10 +568,11 @@ export type ClipMediaKind = 'video' | 'audio' | 'image' | 'adjust' // adjust＝�
 /** 选中的影音图片段：ids＝全部选中的素材片段；clip／lane／media＝面板照哪段显示（最后选的那段）；没有 ⇒ none */
 export type ManualClipState = { kind: 'none' } | { kind: 'clip'; ids: string[]; clip: TlClip; lane: Lane['kind']; media: ClipMediaKind }
 export function manualClipState(tr: Tracks, sel: readonly string[], kindOf: (mediaId: string) => ClipMediaKind | undefined): ManualClipState {
-  const ids = sel.filter((id) => { const f = findClip(tr, id); return !!f && (!!f.clip.adjust || (!!f.clip.mediaId && !!kindOf(f.clip.mediaId))) && !f.lane.locked })
+  // 合成段（comp）在面板上当影片段（画面、变速、动画、调整照用）
+  const ids = sel.filter((id) => { const f = findClip(tr, id); return !!f && (!!f.clip.adjust || !!f.clip.comp || (!!f.clip.mediaId && !!kindOf(f.clip.mediaId))) && !f.lane.locked })
   if (!ids.length) return { kind: 'none' }
   const f = findClip(tr, ids[ids.length - 1])!
-  return { kind: 'clip', ids, clip: f.clip, lane: f.lane.kind, media: f.clip.adjust ? 'adjust' : kindOf(f.clip.mediaId)! }
+  return { kind: 'clip', ids, clip: f.clip, lane: f.lane.kind, media: f.clip.adjust ? 'adjust' : f.clip.comp ? 'video' : kindOf(f.clip.mediaId)! }
 }
 /** 人工页顶上的页签（照剪映排：画面／音频／变速／动画／跟踪／调整；图片没有音频、变速；音频只有音频、变速）·跟踪这次没做（页里写「还没做」） */
 export type ClipTab = 'picture' | 'audio' | 'speed' | 'anim' | 'track' | 'adjust'

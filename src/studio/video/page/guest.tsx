@@ -3,10 +3,12 @@
 //   工程＝工程资料夹（或这个浏览器的 OPFS）里的 project.json＋assets/（格式见 ../FORMAT.md·读写走 ../format.ts）；
 //   素材原档写进 assets/·剪辑用小预览档与波形是这个浏览器的快取；收藏记在这个浏览器。
 //   要网站后端的（云盘、上传、角色对话、终端、朗读、别台导出、历史版本、最近草稿）一律不给 ⇒ 页面不画那几颗钮。
+//   Alt+A 加進對話：没有角色对话 ⇒ 小卡插进右栏底下那个输入框（../../shared/ui/InlineCardBox·记号与画法同登入版），一鍵複製后贴给自己的 AI。
 import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 import type { GuestPageProps, StudioPageHost } from '../../shared/page-host'
 import type { EditorProps, ProjectStore } from '../../shared/types'
 import { StudioTProvider, useStudioLang, useStudioT } from '../../shared/StudioT'
+import { createInlineBox, type InlineBox } from '../../shared/inline-box'
 import { saveProjectSafe } from '../../shared/store'
 import { writeProjectName } from '../../shared/project-file'
 import { updateProject } from '../../shared/projects'
@@ -17,10 +19,12 @@ import { assetSig, cacheKeyOf } from '../export-project'
 import { dropText } from '../drop-text'
 import { forgetStored } from '../lib/opfs-cache'
 import { VEDIT_PROJECT_VERSION, projectTitle, type VeditProject } from '../lib/project.pure'
+import { buildMarkerToken, buildMediaToken, buildTransToken, clipCountLabel, clipsTokenOf, type RefLang } from '../lib/chat-token.pure'
+import { makeVideoCardNode } from '../lib/chat-card-dom'
 import VeditSettingsDialog from '../ui/SettingsDialog'
 import VideoEditPage from './VideoEditPage'
 import { guestWords } from './guest-words'
-import { VEDIT_FEATURES, type AiShieldHandle, type ProjGet, type VideoPageHost } from './host'
+import { VEDIT_FEATURES, type AiShieldHandle, type ProjGet, type VideoChatHost, type VideoPageHost } from './host'
 
 /** 游客版功能表（StudioApp.guestFeatures）：第三方授權小窗；云盘那几颗（上传、最近草稿、历史版本、眼睛钮）要后端 ⇒ 不列＝没有 */
 export const VIDEO_GUEST_FEATURES: Readonly<Record<string, boolean>> = { [VEDIT_FEATURES.licenses]: true }
@@ -39,11 +43,27 @@ type GuestState = {
   /** 开不到的原因（给人看的一句） */ openErr: string
 }
 
-function docToProject(doc: VideoDoc): VeditProject {
-  return { v: VEDIT_PROJECT_VERSION, ratio: doc.ratio, tracks: doc.tracks, programs: doc.programs, media: doc.media.map(({ file: _f, ...m }) => { void _f; return { ...m, from: 'local' as const } }) }
+/** 右栏输入框的小卡画法（同登入版那几颗·游客版点卡没有弹窗 ⇒ 提示字不加「點一下打開」） */
+export function makeGuestVideoBox(lang: () => RefLang): InlineBox {
+  return createInlineBox((doc, raw) => makeVideoCardNode(doc, raw, { countLabel: (n) => clipCountLabel(n, lang()), openTitle: '' }))
+}
+/** Alt+A 加進對話（游客版）：记号同登入版那几支·插进右栏输入框（还没挂上 ⇒ 排着）；没有角色可选 ⇒ adopt 不做事 */
+export function makeGuestVideoChat(box: InlineBox, lang: () => RefLang): VideoChatHost {
+  return {
+    clipsToken: (tr, ids, nameOf) => clipsTokenOf(tr, ids, nameOf, lang()),
+    transToken: (start, tr, length) => buildTransToken(start, tr, length, lang()),
+    markerToken: (at) => buildMarkerToken(at, lang()),
+    mediaToken: (m) => buildMediaToken(m, lang()),
+    insert: (token) => box.insert(token),
+    adopt: () => {},
+  }
 }
 
-export function makeVideoGuestHost(o: { base: StudioPageHost; store: ProjectStore; projectId: string; props: Pick<EditorProps, 'onDirtyChange' | 'onSaveStateChange' | 'registerFlush'>; t: (k: string, v?: Record<string, string | number>) => string; st: GuestState; outside?: Set<() => void> }): VideoPageHost {
+function docToProject(doc: VideoDoc): VeditProject {
+  return { v: VEDIT_PROJECT_VERSION, ratio: doc.ratio, tracks: doc.tracks, programs: doc.programs, media: doc.media.map(({ file: _f, ...m }) => { void _f; return { ...m, from: 'local' as const } }), ...(doc.comps ? { comps: doc.comps } : {}) }
+}
+
+export function makeVideoGuestHost(o: { base: StudioPageHost; store: ProjectStore; projectId: string; props: Pick<EditorProps, 'onDirtyChange' | 'onSaveStateChange' | 'registerFlush'>; t: (k: string, v?: Record<string, string | number>) => string; st: GuestState; outside?: Set<() => void>; chat?: VideoChatHost | null }): VideoPageHost {
   const { base, store, projectId, props, t, st, outside } = o
   const appName = t('studio_app_video')
   const keyOf = (id: string) => cacheKeyOf(id, st.sigs.get(id) ?? '', projectId)
@@ -69,7 +89,7 @@ export function makeVideoGuestHost(o: { base: StudioPageHost; store: ProjectStor
     }
   }
   const docOf = (p: VeditProject): VideoDoc => ({
-    name: st.name, ratio: p.ratio, tracks: p.tracks, programs: p.programs, drops: [],
+    name: st.name, ratio: p.ratio, tracks: p.tracks, programs: p.programs, ...(p.comps ? { comps: p.comps } : {}), drops: [],
     media: p.media.flatMap((m): VideoMedia[] => {
       const file = st.files.get(m.id)
       if (!file) return []
@@ -188,7 +208,7 @@ export function makeVideoGuestHost(o: { base: StudioPageHost; store: ProjectStor
     tts: null,
     webShot: null, // 要网站后端（服务器截图）·游客版没有
     cloudAsr: null,
-    chat: null,
+    chat: o.chat ?? null,
     useAiShield: () => NO_SHIELD,
     renderAiShieldPill: () => null,
     renderAiShield: () => null,
@@ -207,16 +227,21 @@ export default function VideoGuestPage(props: GuestPageProps) {
   const st = useRef<GuestState>({ name: '', files: new Map(), sigs: new Map(), writing: new Map(), trash: new Set(), last: emptyVideoDoc(), openErr: '' }).current
   const live = useRef(props)
   live.current = props
+  const lang = useStudioLang()
+  const langRef = useRef(lang)
+  langRef.current = lang
+  const box = useMemo(() => makeGuestVideoBox(() => langRef.current), [])
+  const chat = useMemo(() => makeGuestVideoChat(box, () => langRef.current), [box])
   // 外框的底座宿主经 ref 读：它换一份（例如改名后）时本页的宿主不跟着重做（整页的 effect 拿宿主当依赖）
   const base = useMemo<StudioPageHost>(() => ({
     kind: 'guest',
     renderHomeBrand: (o) => live.current.host.renderHomeBrand(o),
     renderDriveSlot: (o) => live.current.host.renderDriveSlot(o),
-    renderChatSlot: (o) => live.current.host.renderChatSlot(o),
+    renderChatSlot: (o) => live.current.host.renderChatSlot({ ...o, inlineBox: box }),
     has: (k) => live.current.host.has(k),
     get driveSlotLabel() { return live.current.host.driveSlotLabel },
     get chatSlotLabel() { return live.current.host.chatSlotLabel },
-  }), [])
+  }), [box])
   // 外框报外面改了 project.json（手上没未存改动 ⇒ revision 递增、不重挂）⇒ 交给整页读回换上
   const outside = useRef(new Set<() => void>()).current
   const lastRev = useRef(props.revision)
@@ -226,14 +251,13 @@ export default function VideoGuestPage(props: GuestPageProps) {
     for (const f of [...outside]) f()
   }, [props.revision, outside])
   const host = useMemo(() => makeVideoGuestHost({
-    base, store: props.store, projectId: props.projectId, t, st, outside,
+    base, store: props.store, projectId: props.projectId, t, st, outside, chat,
     props: {
       onDirtyChange: (d) => live.current.onDirtyChange(d),
       onSaveStateChange: (s, d) => live.current.onSaveStateChange?.(s, d),
       registerFlush: (f) => live.current.registerFlush?.(f),
     },
-  }), [base, props.store, props.projectId, t, st, outside])
-  const lang = useStudioLang()
+  }), [base, props.store, props.projectId, t, st, outside, chat])
   const tGuest = useMemo(() => guestWords(t), [t])
   return <StudioTProvider t={tGuest} lang={lang}><VideoEditPage host={host} /></StudioTProvider>
 }

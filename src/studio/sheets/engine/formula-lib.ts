@@ -218,7 +218,9 @@ export function cmpText(a: string, b: string): number {
 
 // ── 通配（* 任意串·? 一个字·~ 跳脱）·不分大小写·整串比对 ──
 export function hasWildcard(s: string): boolean { return /[*?~]/.test(s) }
-export function wildcardRegex(pat: string): RegExp {
+export function wildcardRegex(pat: string): RegExp { return new RegExp(`^${wildcardSource(pat)}$`, 'i') }
+/** 通配样式 ⇒ 不锚定的正则原文（SEARCH 找位置用·整串比对用上面 wildcardRegex） */
+export function wildcardSource(pat: string): string {
   let re = ''
   for (let i = 0; i < pat.length; i++) {
     const ch = pat[i]
@@ -227,7 +229,7 @@ export function wildcardRegex(pat: string): RegExp {
     else if (ch === '?') re += '[\\s\\S]'
     else re += ch.replace(/[.+^${}()|[\]\\/-]/g, '\\$&')
   }
-  return new RegExp(`^${re}$`, 'i')
+  return re
 }
 
 // ── 条件串（SUMIF／COUNTIF／…IFS 的 criteria）──

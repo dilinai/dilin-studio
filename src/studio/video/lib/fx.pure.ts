@@ -27,7 +27,7 @@ export const fxIn = (kind: FxKind, cat: string): FxItem[] => FX_ITEMS.filter((x)
 export const isFxCat = (kind: FxKind, cat: string): boolean => FX_ITEMS.some((x) => x.kind === kind && x.cats.includes(cat))
 
 /** 特效、转场只加在画面轨的素材片段（影片／图片）上 */
-export const decoratable = (lane: Lane, c: TlClip): boolean => lane.kind === 'visual' && !!c.mediaId && !c.text && !c.sticker && !c.filter && !c.program
+export const decoratable = (lane: Lane, c: TlClip): boolean => lane.kind === 'visual' && (!!c.mediaId || !!c.comp) && !c.text && !c.sticker && !c.filter && !c.program // 合成段也挂得上特效转场
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 const endOf = (c: TlClip) => c.start + c.length
 const editLane = (tr: Tracks, lane: Lane, f: (c: TlClip) => TlClip, id: string): Tracks =>

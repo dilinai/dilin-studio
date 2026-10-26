@@ -14,6 +14,8 @@ const app: StudioApp<DocsDoc> = {
   i18n: DOCS_I18N,
   // 单机版本机 MCP：docs_read／docs_edit（读 markdown·局部改）
   agentJob: docsAgentJob,
+  // 单机版命令列 tools/docs-cli.mjs 的 Word 汇出（无头页里跑·同「Word」那颗）
+  cliExport: (store, format, t) => import('./cli-export').then((m) => m.docsCliExport(store, format, t)),
 }
 
 export default app

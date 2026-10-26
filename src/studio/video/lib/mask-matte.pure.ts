@@ -78,27 +78,50 @@ export function storeMasks<M>(list: readonly M[]): { mask?: M; masks?: M[] } {
 // ── ③ 轨道遮罩 ──
 export const MATTE_MODES = ['alpha', 'luma'] as const
 export type MatteMode = (typeof MATTE_MODES)[number]
-/** lane＝当遮罩的那条轨 id（缺＝这条上面最近一条文字／贴纸轨）；mode＝alpha（形状）或 luma（亮度）；invert＝反相（挖掉形状） */
-export type ClipMatte = { lane?: string; mode: MatteMode; invert?: boolean }
+/** 命令／面板上的四种（AE 的 Alpha／Alpha 反相／亮度／亮度反相）＝mode＋invert */
+export const MATTE_KINDS = ['alpha', 'alphaInv', 'luma', 'lumaInv'] as const
+export type MatteKind = (typeof MATTE_KINDS)[number]
+export const matteKindOf = (m: Pick<ClipMatte, 'mode' | 'invert'>): MatteKind => (m.mode === 'luma' ? (m.invert ? 'lumaInv' : 'luma') : m.invert ? 'alphaInv' : 'alpha')
+export const matteFromKind = (k: MatteKind): Pick<ClipMatte, 'mode' | 'invert'> => ({ mode: k.startsWith('luma') ? 'luma' : 'alpha', ...(k.endsWith('Inv') ? { invert: true } : {}) })
+/** 遮罩从哪来：clip＝指定那一段（同一份时间轴里的画面／文字／贴纸片段·那段此刻在才有形状）；lane＝那条轨此刻那段（文字／贴纸／画面轨）；
+ *  都缺＝这条上面最近一条文字／贴纸轨（旧档）。mode＝alpha（形状）或 luma（亮度）；invert＝反相（挖掉形状）；show＝遮罩那层照样显示（缺＝不显示·同 AE） */
+export type ClipMatte = { lane?: string; clip?: string; mode: MatteMode; invert?: boolean; show?: boolean }
 export function parseMatte(v: unknown): ClipMatte | undefined {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
   const o = v as Record<string, unknown>
   const m: ClipMatte = { mode: o.mode === 'luma' ? 'luma' : 'alpha' }
-  if (typeof o.lane === 'string' && o.lane) m.lane = o.lane
+  if (typeof o.clip === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(o.clip)) m.clip = o.clip
+  else if (typeof o.lane === 'string' && o.lane) m.lane = o.lane
   if (o.invert === true) m.invert = true
+  if (o.show === true) m.show = true
   return m
 }
 const isMatteKind = (k: string) => k === 'text' || k === 'sticker'
-/** 片段 laneId 的遮罩用哪条轨：指定的（要是文字／贴纸轨）；缺 ⇒ 往上（tracks 里 index 小＝上面）找最近一条文字／贴纸轨；找不到 ⇒ null */
+/** 指定的轨／片段能当遮罩的种类（文字、贴纸、画面轨；音频、滤镜、程序轨不行） */
+const isMatteSrcKind = (k: string) => k === 'text' || k === 'sticker' || k === 'visual'
+/** 片段 laneId 的遮罩用哪条轨：指定片段 ⇒ 那段所在的轨；指定轨（文字／贴纸／画面轨）；缺 ⇒ 往上（tracks 里 index 小＝上面）找最近一条文字／贴纸轨；找不到 ⇒ null */
 export function matteLaneOf(tr: Tracks, laneId: string, m: ClipMatte | undefined | null): string | null {
   if (!m) return null
-  if (m.lane) { const l = tr.find((x) => x.id === m.lane); return l && l.id !== laneId && isMatteKind(l.kind) ? l.id : null }
+  if (m.clip) { const l = tr.find((x) => x.clips.some((c) => c.id === m.clip)); return l && l.id !== laneId && isMatteSrcKind(l.kind) ? l.id : null }
+  if (m.lane) { const l = tr.find((x) => x.id === m.lane); return l && l.id !== laneId && isMatteSrcKind(l.kind) ? l.id : null }
   const i = tr.findIndex((x) => x.id === laneId)
   for (let j = i - 1; j >= 0; j--) if (isMatteKind(tr[j].kind)) return tr[j].id
   return null
 }
+/** 紧贴在上面那条轨（AE「上一层」·命令 clip.setMatte source:"above" 用）：不是音频／滤镜／程序轨才算；没有 ⇒ null */
+export function laneAbove(tr: Tracks, laneId: string): string | null {
+  const i = tr.findIndex((x) => x.id === laneId)
+  return i > 0 && isMatteSrcKind(tr[i - 1].kind) ? tr[i - 1].id : null
+}
 const activeAt = (cs: readonly TlClip[], t: number) => cs.find((c) => !c.disabled && t >= c.start - 1e-9 && t < c.start + c.length - 1e-9)
-/** 这一刻被拿来当遮罩的轨（那几条本身不画）：画面轨此刻那段挂了 matte 且看得到 ⇒ 它的遮罩轨；药 ⇒ 空 */
+/** 这一刻遮罩轨上当遮罩的那一段：指定片段 ⇒ 它此刻在才算（不在 ⇒ null＝没形状）；否则那条轨此刻那段 */
+export function matteClipAt(tr: Tracks, srcLane: string, m: ClipMatte, t: number): TlClip | null {
+  const l = tr.find((x) => x.id === srcLane)
+  if (!l || l.hidden) return null
+  const c = activeAt(l.clips, t) ?? null
+  return m.clip ? (c && c.id === m.clip ? c : null) : c
+}
+/** 这一刻被拿来当遮罩的轨（那几条本身不画·show 的照画）：画面轨此刻那段挂了 matte 且看得到 ⇒ 它的遮罩轨（指定片段 ⇒ 那段此刻在才算）；药 ⇒ 空 */
 export function matteLanesAt(tr: Tracks, t: number): Map<string, string> {
   const out = new Map<string, string>()
   if (maskMatteNegOff()) return out
@@ -106,11 +129,16 @@ export function matteLanesAt(tr: Tracks, t: number): Map<string, string> {
     if (l.kind !== 'visual' || l.hidden) continue
     const c = activeAt(l.clips, t)
     const m = c?.look?.matte
-    if (!c || !m) continue
+    if (!c || !m || m.show) continue
     const src = matteLaneOf(tr, l.id, m)
-    if (src) out.set(src, l.id)
+    if (src && (!m.clip || matteClipAt(tr, src, m, t))) out.set(src, l.id)
   }
   return out
+}
+/** 挂的遮罩是画面轨（影片／图片／形状／合成段）⇒ 要整层像素去算（预览走 PlanCanvas·同汇出）；文字／贴纸 ⇒ false（照旧画成遮罩图） */
+export function matteIsVisual(tr: Tracks, laneId: string, m: ClipMatte | undefined | null): boolean {
+  const src = matteLaneOf(tr, laneId, m)
+  return !!src && tr.find((x) => x.id === src)?.kind === 'visual'
 }
 /** 遮罩画好的 RGBA 像素 ⇒ 改成「白＋alpha＝留下多少」（汇出 destination-in·预览 mask-image 同一张）：
  *  alpha 模式＝原 alpha；luma 模式＝亮度(Rec.709)×alpha；invert＝1−那个值 */

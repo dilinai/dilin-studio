@@ -26,6 +26,8 @@ import { curveAvg, parseCurve } from './curve-speed.pure' // 曲线变速
 import { parseMarkers } from './toolbar.pure'
 import { parseTextLook } from './text-style.pure'
 import { fixStemLinks, linkOf } from './store.pure' // 编曲素材分轨
+import { NULL_PROPS, fixParents, isRigKf, parseRig, parseRigFields, rigKfOk, type RigBody } from './rig.pure' // 空物件／父子／3D 摄影机灯光
+import { COMPS_MAX, COMP_DEPTH_MAX, COMP_NAME_MAX, breakCompCycles, compNegOff, type Comps } from './comp.pure' // 巢状合成
 
 export const VEDIT_PROJECT_EXT = '.dvedit'
 export const VEDIT_PROJECT_MIME = 'application/vnd.dilin.vedit+json'
@@ -53,7 +55,8 @@ export type ProjectMediaKind = 'video' | 'audio' | 'image'
 /** 编曲素材：stems＝这份（混好的）底下藏着的几份分轨（拖上轨道展开成几条）；stemOf＝我是哪份编曲素材的分轨（素材区不列） */
 export type ProjectMedia = { id: string; name: string; kind: ProjectMediaKind; duration: number; from: 'local' | 'drive'; driveId?: string; noPicture?: boolean; stems?: string[]; stemOf?: string; /** 终端转好、存云盘的剪辑用小档／波形／缩图（换电脑共用·of≠driveId ⇒ 读时丢掉） */ cloudProxy?: CloudProxy }
 export type ProjectProgram = { manifest: unknown; html: string }
-export type VeditProject = { v: number; ratio: RatioSel; tracks: Tracks; media: ProjectMedia[]; programs: Record<string, ProjectProgram> }
+/** comps＝子合成（巢状合成·见 comp.pure.ts·没有就不写这栏＝旧档一样） */
+export type VeditProject = { v: number; ratio: RatioSel; tracks: Tracks; media: ProjectMedia[]; programs: Record<string, ProjectProgram>; comps?: Comps }
 
 export const EMPTY_PROJECT: VeditProject = { v: VEDIT_PROJECT_VERSION, ratio: { kind: 'fit' }, tracks: [{ id: MAIN_LANE, kind: 'visual', clips: [], locked: false, hidden: false, muted: false }], media: [], programs: {} }
 
@@ -116,6 +119,10 @@ export type DropCode = 'media_bad_id' | 'media_dup' | 'media_bad_kind' | 'media_
   | 'clip_no_media' | 'clip_no_body' | 'clip_overlap' | 'group_bad' | 'group_renamed' | 'lane_moved_audio'
   // 片段指到库里没有的特效／转场／动画（已拿掉）·贴纸／滤镜（片段留着但画不出来）
   | 'ref_unknown' | 'ref_unknown_kept' | 'ratio_unknown'
+  // 父层指不到／不能当父层·父子连结绕成圈·表达式读不懂（都只拿掉那一栏）
+  | 'parent_bad' | 'parent_loop' | 'expr_bad'
+  // 巢状合成：合成段指到没有的合成·合成编号／内容不合法·绕回自己·套太深；轨道遮罩指到同一份时间轴里没有的片段
+  | 'clip_no_comp' | 'comp_bad' | 'comp_cycle' | 'comp_deep' | 'matte_bad_ref'
 export type DropIssue = { code: DropCode; id?: string; ids?: string; lane?: string; body?: string; old?: string; group?: string }
 const DROP_ZH: Record<DropCode, (d: DropIssue) => string> = {
   media_bad_id: () => '有一份素材的 id 不合法',
@@ -134,6 +141,14 @@ const DROP_ZH: Record<DropCode, (d: DropIssue) => string> = {
   ref_unknown: (d) => `片段 ${d.id} 的 ${d.body}「${d.old}」不在库里，已拿掉`,
   ref_unknown_kept: (d) => `片段 ${d.id} 的 ${d.body}「${d.old}」不在库里，画不出来`,
   ratio_unknown: (d) => `画面比例 ${d.old} 不认得，已改成「适应」`,
+  parent_bad: (d) => `片段 ${d.id} 的父层「${d.old}」不在或不能当父层，已拿掉父子连结`,
+  parent_loop: (d) => `片段 ${d.id} 的父子连结绕成一圈（经过「${d.old}」），已拿掉这一段的连结`,
+  expr_bad: (d) => `片段 ${d.id} 的 ${d.body} 表达式读不懂或这段没有这一项，已拿掉`,
+  clip_no_comp: (d) => `合成段 ${d.id} 指到的合成 ${d.old} 不在工程里`,
+  comp_bad: (d) => `合成 ${d.id} 的编号或内容不合法`,
+  comp_cycle: (d) => `合成段 ${d.id} 放的合成 ${d.old} 会绕回自己（合成里不能套自己），已拿掉`,
+  comp_deep: (d) => `合成段 ${d.id} 底下套的合成超过 ${COMP_DEPTH_MAX} 层，已拿掉`,
+  matte_bad_ref: (d) => `片段 ${d.id} 的轨道遮罩指到的片段 ${d.old} 不在同一条时间轴的上方各轨，已拿掉遮罩`,
 }
 export const dropZh = (d: DropIssue): string => DROP_ZH[d.code](d)
 
@@ -171,13 +186,43 @@ export function parseProjectIssues(raw: unknown): { ok: true; project: VeditProj
   }
   // 编曲素材：分轨的指向只留指得到的（指不到的拿掉·照常开）
   fixStemLinks(media)
-  // 轨道
+  // 子合成：先认编号（轨道里的合成段要指得到）·各自的轨道同主时间轴一样读（片段编号全工程唯一）
+  const compRaw: Array<[string, Record<string, unknown>]> = []
+  if (isObj(v.comps) && !compNegOff()) for (const [k, c] of Object.entries(v.comps)) {
+    if (!ID_RE.test(k) || !isObj(c) || compRaw.length >= COMPS_MAX) { drop({ code: 'comp_bad', id: k.slice(0, 64) }); continue }
+    compRaw.push([k, c])
+  }
+  const compIds = new Set(compRaw.map(([k]) => k))
+  const clipIds = new Set<string>()
+  const root = parseTracksIn(v.tracks, { mediaIds, clipIds, compIds, drop, animOf })
+  const comps: Comps = {}
+  for (const [k, c] of compRaw) {
+    const len = num(c.length)
+    const ratio = parseRatio(isObj(c.ratio) ? JSON.stringify(c.ratio) : null)
+    comps[k] = { name: typeof c.name === 'string' && c.name.trim() ? c.name.trim().slice(0, COMP_NAME_MAX) : k, ratio, ...(len !== null && len > 0 ? { length: clamp(len, FRAME_SEC, 24 * 3600) } : {}), tracks: parseTracksIn(c.tracks, { mediaIds, clipIds, compIds, drop, animOf }) }
+  }
+  // 绕回自己（A 里放 A、A→B→A）或套太深的合成段拿掉
+  const cyc = breakCompCycles(root, comps)
+  for (const d of cyc.dropped) drop({ code: d.why === 'cycle' ? 'comp_cycle' : 'comp_deep', id: d.clip, old: d.comp })
+  // 程序包（内嵌的上传包）
+  const programs: Record<string, ProjectProgram> = {}
+  if (isObj(v.programs)) for (const [k, p] of Object.entries(v.programs)) if (/^u-[A-Za-z0-9-]{8,64}$/.test(k) && isObj(p) && typeof p.html === 'string' && isObj(p.manifest)) programs[k] = { manifest: p.manifest, html: p.html }
+  const ratio = parseRatio(isObj(v.ratio) ? JSON.stringify(v.ratio) : null)
+  // 写了比例却读成「适应」（例：旧档的字串 "21:9"、库里没有的 preset 键）⇒ 报出来，别默默丢
+  if (v.ratio !== undefined && v.ratio !== null && ratio.kind === 'fit' && !(isObj(v.ratio) && v.ratio.kind === 'fit')) drop({ code: 'ratio_unknown', old: JSON.stringify(v.ratio).slice(0, 60) })
+  return { ok: true, project: { v: VEDIT_PROJECT_VERSION, ratio, tracks: cyc.root, media, programs, ...(Object.keys(cyc.comps).length ? { comps: cyc.comps } : {}) }, issues }
+}
+
+type TracksCtx = { mediaIds: ReadonlySet<string>; clipIds: Set<string>; compIds: ReadonlySet<string>; drop: (d: DropIssue) => void; animOf: (raw: unknown, id: string) => ReturnType<typeof parseTextAnim> }
+const FRAME_SEC = 1 / 30
+/** 一份轨道（主时间轴或一份子合成）：不合规的条目丢掉·一定有主轨·同轨重叠的后者丢掉·素材片段要指到清单里有的素材·合成段要指到有的合成 */
+function parseTracksIn(rawTracks: unknown, x: TracksCtx): Tracks {
+  const { mediaIds, clipIds, compIds, drop, animOf } = x
   const tracks: Tracks = []
   const laneIds = new Set<string>()
-  const clipIds = new Set<string>()
   // 只收已通過全部片段校形的舊群組成員；不能把會被丟掉的同名片段當作相容依據。
   const legacyGroups = new Map<string, TlClip[]>()
-  for (const l of Array.isArray(v.tracks) ? v.tracks : []) {
+  for (const l of Array.isArray(rawTracks) ? rawTracks : []) {
     if (!isObj(l) || typeof l.id !== 'string' || !ID_RE.test(l.id) || laneIds.has(l.id)) { drop({ code: 'lane_bad_id' }); continue }
     const kind = l.id === MAIN_LANE ? 'visual' : l.kind as LaneKind
     if (!LANE_KINDS.includes(kind)) { drop({ code: 'lane_bad_kind', id: l.id }); continue }
@@ -190,20 +235,30 @@ export function parseProjectIssues(raw: unknown): { ok: true; project: VeditProj
       const start = num(c.start), length = num(c.length)
       if (!id || start === null || start < 0 || length === null || length <= 0) { drop({ code: 'clip_bad_shape', lane: l.id }); continue }
       const clip: TlClip = { id, mediaId: '', start, length, offset: Math.max(0, num(c.offset) ?? 0) }
+      /** 这段能打哪几项关键帧（各分支设·表达式也只收这几项） */
+      let kfOk: (p: KfProp) => boolean = () => false
       // 形状／纯色片段（画面轨·mediaId 空）：内容验值＋位置大小旋转不透明度（look 只收这几项）＋关键帧（同几项）＋动画
-      const vec = kind === 'visual' && !c.mediaId ? (c.shape !== undefined ? parseShape(c.shape) : c.solid !== undefined ? parseSolid(c.solid) : c.bgfx !== undefined ? parseBgfx(c.bgfx) : null) : null
+      //   空物件／摄影机／灯光（rig）同一格：空物件同形状；摄影机／灯光没有 look、动画·关键帧只收 cam.*／lt.*
+      const vec = kind === 'visual' && !c.mediaId ? (c.shape !== undefined ? parseShape(c.shape) : c.solid !== undefined ? parseSolid(c.solid) : c.bgfx !== undefined ? parseBgfx(c.bgfx) : c.rig !== undefined ? parseRig(c.rig) : null) : null
       if (vec) {
-        if (c.shape !== undefined) clip.shape = vec as ShapeBody; else if (c.solid !== undefined) clip.solid = vec as SolidBody; else clip.bgfx = vec as BgfxBody
+        if (c.shape !== undefined) clip.shape = vec as ShapeBody; else if (c.solid !== undefined) clip.solid = vec as SolidBody; else if (c.bgfx !== undefined) clip.bgfx = vec as BgfxBody; else clip.rig = vec as RigBody
         clip.offset = 0
-        const lk = parseLook(c.look)
+        const ctl = clip.rig && clip.rig.kind !== 'null' // 摄影机／灯光
+        const lk = ctl ? undefined : parseLook(c.look)
         if (lk) { const o: Record<string, unknown> = {}; for (const k of ['sx', 'sy', 'uniform', 'x', 'y', 'rot', 'opacity'] as const) if (lk[k] !== undefined) o[k] = lk[k]; if (Object.keys(o).length) clip.look = o as TlClip['look'] }
-        const kf = pickKf(parseKf(c.kf), (p) => ['sx', 'sy', 'x', 'y', 'rot', 'opacity'].includes(p))
+        const kf = pickKf(parseKf(c.kf), kfOk = clip.rig ? rigKfOk(clip.rig) : (p) => NULL_PROPS.includes(p))
         if (kf) clip.kf = kf
-        const anim = animOf(c.anim, id)
+        const anim = ctl ? undefined : animOf(c.anim, id)
         if (anim) clip.anim = anim
       } else if (body === 'media') {
-        if (typeof c.mediaId !== 'string' || !mediaIds.has(c.mediaId)) { drop({ code: 'clip_no_media', id }); continue }
-        clip.mediaId = c.mediaId
+        // 合成段（画面轨·mediaId 空·comp＝子合成编号）：其余栏位照素材片段读（变速、倒放、定格、外观、特效转场、关键帧、动画…）
+        if (kind === 'visual' && !c.mediaId && typeof c.comp === 'string') {
+          if (!compIds.has(c.comp)) { drop({ code: 'clip_no_comp', id, old: c.comp.slice(0, 64) }); continue }
+          clip.comp = c.comp
+        } else {
+          if (typeof c.mediaId !== 'string' || !mediaIds.has(c.mediaId)) { drop({ code: 'clip_no_media', id }); continue }
+          clip.mediaId = c.mediaId
+        }
         const vol = num(c.volume)
         if (vol !== null) clip.volume = clamp(vol, 0, 10)
         if (c.muted === true) clip.muted = true
@@ -222,7 +277,7 @@ export function parseProjectIssues(raw: unknown): { ok: true; project: VeditProj
     if (c.reverse === true && !clip.curve) clip.reverse = true
     if (c.freeze === true && kind === 'visual') { clip.freeze = true; delete clip.reverse; delete clip.curve; delete clip.speed }
         // 关键帧（画面轨才收画面那几项）
-        const kf = pickKf(parseKf(c.kf), (p) => p === 'vol' || (kind === 'visual' && !TEXT_ONLY_KF.has(p) && p !== 'flt'))
+        const kf = pickKf(parseKf(c.kf), kfOk = (p) => p === 'vol' || (kind === 'visual' && !TEXT_ONLY_KF.has(p) && p !== 'flt' && !isRigKf(p)))
         if (kf) clip.kf = kf
         for (const k of ['fadeIn', 'fadeOut'] as const) { const f = num(c[k]); if (f !== null && f > 0) clip[k] = Math.round(clamp(f, 0, Math.min(10, length)) * 10) / 10 }
         if (kind === 'visual') {
@@ -245,7 +300,7 @@ export function parseProjectIssues(raw: unknown): { ok: true; project: VeditProj
         clip.adjust = true
         const look = parseLook(c.look)
         if (look) { const { hsl, curves, wheels, lut, adj } = look; const g = { ...(hsl ? { hsl } : {}), ...(curves ? { curves } : {}), ...(wheels ? { wheels } : {}), ...(lut ? { lut } : {}), ...(adj ? { adj } : {}) }; if (Object.keys(g).length) clip.look = g }
-        const kf = pickKf(parseKf(c.kf), (p) => p.startsWith('adj.'))
+        const kf = pickKf(parseKf(c.kf), kfOk = (p) => p.startsWith('adj.'))
         if (kf) clip.kf = kf
       } else {
         const b = body === 'text' ? parseText(c.text) : body === 'sticker' ? parseSticker(c.sticker) : body === 'filter' ? parseFilter(c.filter) : parseProgramBody(c.program)
@@ -255,7 +310,8 @@ export function parseProjectIssues(raw: unknown): { ok: true; project: VeditProj
         if (body === 'filter' && !FILTER_IDS.has((b as FilterBody).filter)) drop({ code: 'ref_unknown_kept', id, body: 'filter', old: (b as FilterBody).filter })
         // 文字（位置／缩放／旋转／不透明度）、滤镜（强度）关键帧
         const isPin = (p: string) => p.startsWith('pin.')
-        const kf = body === 'text' ? pickKf(parseKf(c.kf), (p) => TEXT_ONLY_KF.has(p) || isPin(p)) : body === 'sticker' ? pickKf(parseKf(c.kf), isPin) : body === 'filter' ? pickKf(parseKf(c.kf), (p) => p === 'flt') : undefined
+        kfOk = body === 'text' ? (p) => TEXT_ONLY_KF.has(p) || isPin(p) : body === 'sticker' ? isPin : body === 'filter' ? (p) => p === 'flt' : () => false
+        const kf = body === 'program' ? undefined : pickKf(parseKf(c.kf), kfOk)
         if (kf) clip.kf = kf
         // 四角透视：文字／贴纸也能套（look 只收 pin）
         if (body === 'text' || body === 'sticker') { const pin = parseLook(c.look)?.pin; if (pin) clip.look = { pin } }
@@ -263,6 +319,8 @@ export function parseProjectIssues(raw: unknown): { ok: true; project: VeditProj
         // 贴纸动画：入场／出场／循环存在片段身上（同画面片段 anim）
         if (body === 'sticker') { const anim = animOf(c.anim, id); if (anim) clip.anim = anim }
       }
+      // 父子连结（指不指得到最后才验·fixParents）·3D·表达式（只收这段能打关键帧的那几项＋3D 项）
+      for (const p of parseRigFields(c, clip, kind, kfOk).badExpr) drop({ code: 'expr_bad', id, body: p })
       if (c.disabled === true) clip.disabled = true
       if (typeof c.group === 'string' && ID_RE.test(c.group)) clip.group = c.group //
       const prev = clips[clips.length - 1]
@@ -280,6 +338,8 @@ export function parseProjectIssues(raw: unknown): { ok: true; project: VeditProj
     if (marks) lane.markers = marks
     tracks.push(lane)
   }
+  // 父子连结：父层指不到／不能当父层 ⇒ 拿掉；绕成圈 ⇒ 拿掉形成圈那段的连结（片段本身照留）
+  for (const x of fixParents(tracks)) drop({ code: x.loop ? 'parent_loop' : 'parent_bad', id: x.id, old: x.old })
   // 相容 d67a5ce2 生成的 copy-group:<副本id>[:正整數]：固定副本必須真的在同一原組。
   // 只換編號、不猜或合併成員；先保留全部合法組，碰名另取短尾碼。已丟失 group 的檔不補猜。
   const usedGroups = new Set(tracks.flatMap((l) => l.clips.flatMap((c) => c.group ? [c.group] : [])))
@@ -303,24 +363,30 @@ export function parseProjectIssues(raw: unknown): { ok: true; project: VeditProj
   // 主轨钉在上区最底下（紧贴音频区）
   const upperNoMain = tracks.filter((l) => l.kind !== 'audio' && l.id !== MAIN_LANE)
   const ordered = [...upperNoMain, ...tracks.filter((l) => l.id === MAIN_LANE), ...tracks.filter((l) => l.kind === 'audio')]
-  // 程序包（内嵌的上传包）
-  const programs: Record<string, ProjectProgram> = {}
-  if (isObj(v.programs)) for (const [k, p] of Object.entries(v.programs)) if (/^u-[A-Za-z0-9-]{8,64}$/.test(k) && isObj(p) && typeof p.html === 'string' && isObj(p.manifest)) programs[k] = { manifest: p.manifest, html: p.html }
-  const ratio = parseRatio(isObj(v.ratio) ? JSON.stringify(v.ratio) : null)
-  // 写了比例却读成「适应」（例：旧档的字串 "21:9"、库里没有的 preset 键）⇒ 报出来，别默默丢
-  if (v.ratio !== undefined && v.ratio !== null && ratio.kind === 'fit' && !(isObj(v.ratio) && v.ratio.kind === 'fit')) drop({ code: 'ratio_unknown', old: JSON.stringify(v.ratio).slice(0, 60) })
-  return { ok: true, project: { v: VEDIT_PROJECT_VERSION, ratio, tracks: ordered, media, programs }, issues }
+  // 轨道遮罩指定的片段要在同一份轨道里（上区·不是自己那条轨）·指不到 ⇒ 拿掉遮罩
+  for (const l of ordered) for (const c of l.clips) {
+    const mc = c.look?.matte?.clip
+    if (!mc) continue
+    const src = ordered.find((y) => y.clips.some((z) => z.id === mc))
+    if (src && src.id !== l.id && src.kind !== 'audio' && src.kind !== 'filter' && src.kind !== 'program') continue
+    const { matte: _m, ...look } = c.look!
+    void _m
+    if (Object.keys(look).length) c.look = look; else delete c.look
+    drop({ code: 'matte_bad_ref', id: c.id, old: mc })
+  }
+  return ordered
 }
 
 const cloudProxyPart = (m: { cloudProxy?: CloudProxy; driveId?: string }) => { const c = parseCloudProxy(m.cloudProxy, m.driveId); return c ? { cloudProxy: c } : {} }
 /** 页面现况 ⇒ 要存的工程档（只存用到或在素材区的素材·暂时栏位不进档） */
-export function buildProject(p: { ratio: RatioSel; tracks: Tracks; media: ReadonlyArray<{ id: string; name: string; kind: ProjectMediaKind; duration: number; from: 'local' | 'drive'; driveId?: string; noPicture?: boolean; stems?: string[]; stemOf?: string; cloudProxy?: CloudProxy }>; programs?: Record<string, ProjectProgram> }): VeditProject {
+export function buildProject(p: { ratio: RatioSel; tracks: Tracks; media: ReadonlyArray<{ id: string; name: string; kind: ProjectMediaKind; duration: number; from: 'local' | 'drive'; driveId?: string; noPicture?: boolean; stems?: string[]; stemOf?: string; cloudProxy?: CloudProxy }>; programs?: Record<string, ProjectProgram>; comps?: Comps }): VeditProject {
   return {
     v: VEDIT_PROJECT_VERSION,
     ratio: p.ratio,
     tracks: p.tracks,
     media: p.media.map((m) => ({ id: m.id, name: m.name, kind: m.kind, duration: m.duration, from: m.from, ...(m.driveId ? { driveId: m.driveId } : {}), ...(m.noPicture ? { noPicture: true } : {}), ...(m.stems?.length ? { stems: [...m.stems] } : {}), ...(m.stemOf ? { stemOf: m.stemOf } : {}), ...cloudProxyPart(m) })),
     programs: p.programs ?? {},
+    ...(p.comps && Object.keys(p.comps).length ? { comps: p.comps } : {}),
   }
 }
 
@@ -343,7 +409,7 @@ export const PROJECT_SCHEMA_HINT = [
   'text may also carry (all optional, omit = follow the fancy style): font:"sans"|"serif"|"mono", bold, italic, underline, color:"#rrggbb", letterSpacing(em -1..2), lineSpacing(em 0..2), align:"left"|"center"|"right", scale(0.1..5, multiplies size), rotate(deg), opacity(0..1), stroke:{color:"#rrggbb",width(em 0.003..0.3)}, bg:{color:"#rrggbb",opacity 0..1}; content may contain \\n for several lines. Text anim?{in?,out?,loop?:{id,dur,stagger?}}: per-letter ids in-pc-*/out-pc-* (fade, spin, fold, standup, pop; each letter flips in 3D) play letter by letter, dur = whole span, stagger = seconds between letters 0..1 (default automatic: dur × 0.7 ÷ letters, within 0.03..0.5).',
   'Visual lanes may also hold shape clips {id,start,length,offset:0,shape:{shape:"rect"|"ellipse"|"arrow"|"line",stroke:"#rrggbb",width(stroke width, fraction of frame height 0.002..0.1),fill?:"#rrggbb"(rect/ellipse; absent = no fill),radius(rect corner, fraction of short side 0..0.5),w,h(box size, fraction of frame width/height; centred),grow?(sec of the stroke-grow entrance: outline drawn from start to end)}} and solid-colour clips {id,start,length,offset:0,solid:{color:"#rrggbb"}} (fills the whole frame) and animated-background clips {id,start,length,offset:0,bgfx:{kind:"stars"(twinkling star particles drifting slowly)|"bokeh"(soft light blobs drifting),color:"#rrggbb"(particle colour),bg:"#rrggbb"(background),density 0..1,speed 0..2(0 = still),seed(integer; same seed = same picture),parallax?:true(whole layer slowly pans/zooms)}}; all three have no mediaId and may carry look?{x,y,sx,sy,uniform,rot,opacity}, kf? on those props and anim? like picture clips. ',
   `On video/image clips of visual lanes: fx?:[{fx,strength 0..1}] = effects on the clip (max 4); transIn?:{tr,length sec 0.2..3} = transition on the seam with the previous clip (that clip ends exactly where this one starts); if no clip ends there (e.g. the first clip) it is an opening transition: the clip comes in from black over its first length seconds. Effect ids: ${FX_ITEMS.filter((x) => x.kind === 'effect').map((x) => `${x.id}(${x.name.cn})`).join(' ')}. Transition ids: ${FX_ITEMS.filter((x) => x.kind === 'transition').map((x) => `${x.id}(${x.name.cn})`).join(' ')}.`,
-  'Video/audio clips may also carry: speed?(0.1..100, source seconds per timeline second; length is timeline length, so a 10s source at speed 2 has length 5), pitch?(true = pitch follows speed), fadeIn?/fadeOut?(sec of audio fade). Visual clips may carry look?{sx,sy(scale, 1=100%),uniform?(false=non-uniform),x,y(offset from centre as a fraction of canvas width/height, y up),rot(deg),blend?:"normal"|"darken"|"multiply"|"color-burn"|"lighten"|"screen"|"color-dodge"|"overlay"|"soft-light"|"hard-light"|"difference"|"exclusion",opacity(0..1),mask?{shape:"linear"|"mirror"|"circle"|"rect"|"star"|"heart"|"pen"|"stripes",x,y,w,h,rot,feather 0..100,radius 0..100,invert; stripes: count 1..60,gap 0..0.95,progress 0..1 (keyframe mask.progress = blinds reveal, bands open one after another),stagger 0..1,ease:"linear"|"in"|"out"|"inout"; angle=rot},masks?[mask,...](2..8 masks; when present mask = masks[0] for older readers; keyframes mask.* drive masks[0]),maskOp?:"and"|"or"(combine several masks: and=intersection default, or=union),matte?{lane?(text/sticker lane id; default nearest text/sticker lane above),mode:"alpha"|"luma",invert?}(track matte: clip shows only through the shape of that lane at the same moment; that lane is not drawn itself while used; blend modes also composite with text layers below),adj?{temp,tint,sat,vib,bright,contrast,highlight,shadow,white,black,light,vignette: -100..100; sharpen,clarity,grain,fade: 0..100}} and anim?{in?,out?,loop?:{id,dur}} (same ids as text animations, except typewriter ones). ' +
+  'Video/audio clips may also carry: speed?(0.1..100, source seconds per timeline second; length is timeline length, so a 10s source at speed 2 has length 5), pitch?(true = pitch follows speed), fadeIn?/fadeOut?(sec of audio fade). Visual clips may carry look?{sx,sy(scale, 1=100%),uniform?(false=non-uniform),x,y(offset from centre as a fraction of canvas width/height, y up),rot(deg),blend?:"normal"|"darken"|"multiply"|"color-burn"|"lighten"|"screen"|"color-dodge"|"overlay"|"soft-light"|"hard-light"|"difference"|"exclusion",opacity(0..1),mask?{shape:"linear"|"mirror"|"circle"|"rect"|"star"|"heart"|"pen"|"stripes",x,y,w,h,rot,feather 0..100,radius 0..100,invert; stripes: count 1..60,gap 0..0.95,progress 0..1 (keyframe mask.progress = blinds reveal, bands open one after another),stagger 0..1,ease:"linear"|"in"|"out"|"inout"; angle=rot},masks?[mask,...](2..8 masks; when present mask = masks[0] for older readers; keyframes mask.* drive masks[0]),maskOp?:"and"|"or"(combine several masks: and=intersection default, or=union),matte?{clip?(id of a clip on another upper lane of the same timeline: video/image/shape/composition/text/sticker),lane?(text/sticker/visual lane id; default nearest text/sticker lane above),mode:"alpha"|"luma",invert?,show?}(track matte: clip shows only through that clip/lane at the same moment — alpha = its shape, luma = its brightness, invert = cut it out instead; the matte layer is not drawn itself while used unless show:true; if the named clip is not on screen at that moment nothing shows through (inverted: everything shows); blend modes also composite with text layers below),adj?{temp,tint,sat,vib,bright,contrast,highlight,shadow,white,black,light,vignette: -100..100; sharpen,clarity,grain,fade: 0..100}} and anim?{in?,out?,loop?:{id,dur}} (same ids as text animations, except typewriter ones). ' +
     'Video/audio clips may carry kf?{<prop>:[{t,v,e?}]} keyframes: t = source-media seconds (same unit as offset), v = value, e = ease of the segment to the next key ("linear"|"in"|"out"|"inout"|"in2"|"out2"|"inout2"|"backIn"|"backOut"|"hold" or bezier handles [x1,y1,x2,y2]); props: sx,sy,x,y,rot,opacity, mask.x|y|w|h|rot|feather|radius, adj.<adjust key>, vol (dB, -40 = mute; audio too); text clips: tx,ty (centre 0..1), ts (scale), trot (deg), top (opacity 0..1); filter clips: flt (strength 0..1). ' +
     'Visual (video) clips may carry mtrack?:[{id,pts:[[srcSec,x,y,scale],...](motion-tracking path computed in the editor; x/y = tracked centre as fraction of output frame; scale relative to the start box),w,h}]; text/sticker clips may carry follow?:{clip(video clip id),track(mtrack id),at(srcSec of the path at bind time)} = the whole text/sticker layer moves (and scales about the tracked point) with that path; content/style stay editable; remove follow to stop following (command clip.followTrack). ' +
     'Visual clips may carry mosaic?:[{id,pts:[[srcSec,x,y],...](user-recorded tracking path; x/y = centre as fraction of output frame; srcSec = media seconds like keyframes),shape:"rect"|"round"|"ellipse",mode:"pixel"|"blur"|"solid",w,h(box size as fraction of frame width/height),strength(1..100),color:"#rrggbb"(solid)}] = tracked censoring boxes applied on the composited frame; change style fields freely, keep pts unless asked; to move/scale the whole path edit pts; points >2s apart are treated as a break (box hidden between). ' +
@@ -356,6 +422,12 @@ export const PROJECT_SCHEMA_HINT = [
       'Visual clips (video/image/text/sticker) may carry look.pin?{x0,y0,x1,y1,x2,y2,x3,y3} = corner pin (perspective warp of the whole rendered layer): offset of each frame corner (0 top-left,1 top-right,2 bottom-right,3 bottom-left) as a fraction of frame width/height, y down, -2..2; absent = no warp; keyframe props pin.x0..pin.y3. ' +
       'Visual clip look may also carry flipH?/flipV?:true (mirror), crop?{l,t,r,b} (fraction of the source cut from each side, 0..0.9), bg?{kind:"color",color:"#rrggbb"}|{kind:"blur",amount:1..4} (fill behind the clip where it does not cover the frame). ' +
       'curve?{id:"custom"|"montage"|"hero"|"bullet"|"jump"|"flashIn"|"flashOut",pts:[[x 0..1 of clip length, speed 0.1..10],...]} = curve speed (replaces speed; length = source seconds / average speed).',
+  'Rig (AE-style null / parenting / expressions / 3D): visual lanes may hold rig clips {id,start,length,offset:0,rig:{kind:"null"}|{kind:"camera",x,y,z,tx,ty,tz,fov(5..150 vertical deg, default 40),aperture?(0..100 depth of field),focus?(distance)}|{kind:"light",light:"parallel"|"point"|"spot"|"ambient",color:"#rrggbb",intensity(0..10, 1=100%),x,y,z,tx,ty,tz(target),cone(1..170 deg, spot),feather(0..100)}} — they draw nothing (preview shows a null as a dashed box); a null carries look{x,y,sx,sy,uniform,rot,opacity}, kf and anim like a shape; camera kf props cam.x|y|z|tx|ty|tz|fov, light kf props lt.int|x|y|z. Camera/light positions are in frame heights, origin = frame centre, y up, z + = into the picture; the default camera (no camera clip) sits at z = -0.5/tan(20°) ≈ -1.3737 so depth 0 looks exactly 2D; the topmost lane\'s camera covering the time wins. ' +
+    'Any video/image, shape/solid/bgfx, text, sticker or null clip may carry parent:"<clip id>" (+ parentAlpha?:true): the parent\'s position/scale/rotation at that moment (base + keyframes + expressions + clip anim) cascade to it through the chain, relative to the parent at rest; cameras/lights may have a parent but cannot be one; loops and missing parents are dropped on load. ' +
+    'The same clips may carry d3:{z?,rx?,ry?,rz?} (present = 3D layer; z frame heights + = farther; rx + = bottom edge away, ry + = right edge away, rz clockwise; kf props d3.z|rx|ry|rz): rendered as a flat card in 3D through the camera with perspective, consecutive 3D layers sorted far-to-near, shaded by lights (simplified Lambert, per layer; no lights = unlit). ' +
+    'Any keyframable property may carry an expression: expr:{<prop>:"<expression>"} (max 1000 chars; sandboxed: numbers, arithmetic, comparisons, ?:, var/let/const; names time, value, thisClip, clip("id"), Math.*; functions wiggle(freq,amp,oct?,mult?,t?), loopOut("cycle"|"pingpong",n?), linear/ease/easeIn/easeOut(t,tMin,tMax,v1,v2), clamp, noise; clip handles .start .length .end .offset and property names e.g. clip("a").x, .prop("d3.z", t?)); on an error that moment falls back to the keyframed/base value.',
+  'Nested compositions (precomps): top-level comps?{<compId>:{name,ratio(same shapes as the project ratio; {kind:"fit"} = same as the parent frame),length?(sec; default = end of its last clip),tracks:[lane…](same rules as the main tracks, needs its own "main" lane)}}. A clip on a visual lane with comp:"<compId>" and no mediaId places that composition like a video clip: start/length/offset(sec into the composition)/speed/reverse/freeze/look/kf/anim/fx/transIn/matte all apply; areas the composition does not cover are transparent. Compositions may contain composition clips of other compositions but never themselves (directly or through others: such clips are dropped on load). Clip ids are unique across the whole project. Sound inside a composition is mixed into the export when the composition clip has normal speed. ',
+  'Program clips (program lanes): program:{pkg, version, params:{<key>:value}} = an animated overlay drawn by a program package (HTML/canvas in a sandbox, transparent background); pkg = a built-in id (b-title-pop) or a key of programs; programs = {"u-<8..64 letters, digits or ->": {manifest:{name, version, defaultLength, params:[{key, label, type:"text"|"color"|"number"|"select"|"bool", default, min?, max?, options?}]}, html (sets window.dilinProgram = {render(t, params, size)})}} — embedded packages, at most 4 MB together. To put a program animation in, use video_edit_run step by step: program.define (register manifest + html) then program.add (place it; params checked against the manifest, numbers clamped), program.update (change params) — do not rewrite the whole project for it.',
   'media = { id, name, kind:"video"|"audio"|"image", duration(sec, 0 if unknown), from:"local"|"drive", driveId?, cloudProxy? (editor-managed small editing copy made from driveId — keep it as is; it is dropped automatically if you point driveId elsewhere) }; to use a Drive file add { id:<new id>, from:"drive", driveId:<drive file id>, kind, name, duration } and reference it by mediaId.',
   'Pass base_updated_at from get_video_edit to update_video_edit so you never overwrite the user\'s newer edits; the editor shows your change within ~2 seconds.',
 ].join('\n')

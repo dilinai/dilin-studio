@@ -40,6 +40,8 @@ import VeditProgramFrame from '../ui/ProgramFrame'
 import VeditScrubBar from '../ui/ScrubBar'
 import VeditFxCanvas, { type FxOther } from '../ui/FxCanvas'
 import VeditVectorCanvas from '../ui/VectorCanvas'
+import VeditPlanCanvas from '../ui/PlanCanvas' // 合成段、画面层当遮罩：预览走汇出那支 frameDrawer
+import { compAspect, compDuration, precompose, type Comps } from '../lib/comp.pure' // 巢状合成
 import { SHAPE_DEFAULT_SECONDS, SHAPE_KINDS, VECTOR_DRAG_MIME, addBackgroundAt, addVectorAt, isBackgroundClip, newBgfxClip, newShapeClip, newSolidClip, patchBgfx, type ShapeKind } from '../lib/shape.pure'
 import { BGFX_KINDS, bgfxSeed, type BgfxKind } from '../lib/bgfx.pure' // 动态背景（星空粒子／光斑漂移）
 /** 拖来的形状／纯色卡值（shape:<种类>／solid:#rrggbb）⇒ 新片段；认不得 ⇒ null */
@@ -88,6 +90,9 @@ import { ensureFontsLoaded } from '../../shared/fonts/load'
 import { charCount, charCss, charPoses, poseIdle, textAnimPose, visibleChars } from '../lib/text-anim.pure'
 import { adjustFilterBody, adjustLayersOver, applyClipPatch, clipAnimPose, clipKfTimes, clipLiveStep, cropClipPath, kfCurrent, lookGrade, shadowCss, fadeGain, frameIn, fitLayerCss, gainAt, lookOf, lookStyle, manualClipState, masksUrl, patchClips, type ClipLive, type ClipPatch, volumeEnvelope, glowCss, borderRing, borderCss, lookXform } from '../lib/clip-look.pure'
 import { pinCssMatrix, pinHandlePos, pinMatrix, pinQuad, type ClipPin } from '../lib/corner-pin.pure' // 四角透视
+import { canChild, newCameraClip, newLightClip, newNullClip, patchRigClip, rigCssMatrix, rigScene, shadeMatrixValues, type RigOut, type RigPatch } from '../lib/rig.pure' // 空物件／父子连结／3D 摄影机灯光（同汇出那份）
+import { setExprScene } from '../lib/expr.pure' // 表达式
+import VeditRigPanel from '../ui/RigPanel' // 父层／3D／表达式／摄影机灯光面板
 import { bindFollow, boxToHost, followAt, followCssMatrix, followPoint, hostXf, makeMTrack, mergeMTrack, patchMTracks, trackTimes, type TrackBox } from '../lib/motion-track.pure' // 运动跟踪
 import { runTrack } from '../ui/track-client'
 import { VeditFollowPinPanel, type MTrackHost } from '../ui/MotionTrackPanel'
@@ -102,7 +107,7 @@ import { renderSubClip } from '../ui/mix'
 import VeditExportDialog from '../ui/ExportDialog'
 import { canExportVideo, renderVideo, type ExportEnv } from '../ui/export-render'
 import { exportSize, matteOpOf } from '../lib/export.pure'
-import { blendHost, matteLanesAt } from '../lib/mask-matte.pure' // 轨道遮罩／混合跨文字层
+import { blendHost, matteIsVisual, matteLanesAt } from '../lib/mask-matte.pure' // 轨道遮罩／混合跨文字层
 import { matteCssUrl } from '../ui/matte-draw' // 轨道遮罩（同汇出那支）
 import { clipsSnapshot, offloadable, offloadPart, type OffloadAct } from '../lib/offload.pure'
 import { syncMediaEl } from '../ui/media-sync'
@@ -181,7 +186,7 @@ const MENU_LABEL: Record<T.MenuAct, TKey> = {
   split: 'vedit_tool_split', detach: 'vedit_menu_detach', mute: 'vedit_menu_mute', disable: 'vedit_menu_disable', replace: 'vedit_menu_replace',
   find: 'vedit_menu_find', 'add-chat': 'vedit_menu_add_chat', group: 'vedit_menu_group', ungroup: 'vedit_menu_ungroup', subclip: 'vedit_menu_subclip', merge: 'vedit_menu_merge',
   freeze: 'vedit_tool_freeze', reverse: 'vedit_tool_reverse', mirror: 'vedit_tool_mirror', 'copy-attr': 'vedit_menu_copy_attr', 'paste-attr': 'vedit_menu_paste_attr',
-  stems: 'vedit_menu_stems',
+  stems: 'vedit_menu_stems', precomp: 'vedit_menu_precomp',
 }
 const MENU_LABEL_ON: Partial<Record<T.MenuAct, TKey>> = { mute: 'vedit_menu_unmute', disable: 'vedit_menu_enable', reverse: 'vedit_menu_unreverse' }
 
@@ -896,6 +901,22 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
   const [tracks, setTracks] = useState<T.Tracks>(T.EMPTY_TRACKS)
   const tracksRef = useRef(tracks)
   tracksRef.current = tracks
+  // 巢状合成：comps＝全部子合成（眼前在改的那份以 tracks 为准）；compPath＝正在改哪一层（空＝主时间轴·最后一个＝眼前这份）；
+  //   rootTracksRef＝进合成时存起来的主时间轴。tracks／复原栈永远是眼前这一层（换层＝复原栈清空）
+  const [comps, setComps] = useState<Comps>({})
+  const compsRef = useRef(comps)
+  const putComps = useCallback((c: Comps) => { compsRef.current = c; setComps(c) }, [])
+  const [compPath, setCompPath] = useState<string[]>([])
+  const compPathRef = useRef(compPath)
+  compPathRef.current = compPath
+  const rootTracksRef = useRef<T.Tracks>(T.EMPTY_TRACKS)
+  /** 整份（主时间轴＋全部合成·眼前这层写回）：存档、汇出、角色看帧用 */
+  const wholeNow = useCallback((): { tracks: T.Tracks; comps: Comps } => {
+    const path = compPathRef.current
+    if (!path.length) return { tracks: tracksRef.current, comps: compsRef.current }
+    const cur = path[path.length - 1], c = compsRef.current[cur]
+    return { tracks: rootTracksRef.current, comps: c ? { ...compsRef.current, [cur]: { ...c, tracks: tracksRef.current } } : compsRef.current }
+  }, [])
   const histRef = useRef<T.Hist>(T.EMPTY_HIST)
   // 编辑遮罩：角色正在改这份工程档（服务端编辑锁·钩子在下面 aiShield）⇒ 一切改动挡掉·挡了就在下面提示一句
   const aiLockedRef = useRef(false)
@@ -940,7 +961,9 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
     commitTracks(raw, prev)
   }, [commitTracks])
   /** 命令层看的页面现况（比例、素材在下面才宣告·这里只在动作当下读） */
-  const cmdState = (tracks: T.Tracks = tracksRef.current): CmdState => ({ tracks, ratio: ratioRef.current, media: mediaRef.current.map(PC.toCmdMedia) })
+  const cmdState = (tracks: T.Tracks = tracksRef.current): CmdState => ({ tracks, ratio: ratioRef.current, media: mediaRef.current.map(PC.toCmdMedia), programs: cmdPrograms() })
+  /** 这页读到的上传程序包（u-…）⇒ 命令层 program.add／program.update 认得（progBundlesRef 在下面才宣告·这里只在动作当下读） */
+  const cmdPrograms = (): Record<string, ProjectProgram> => Object.fromEntries(Object.entries(progBundlesRef.current).flatMap(([k, b]) => (b && k.startsWith('u-') ? [[k, { manifest: b.manifest, html: b.html }]] : [])))
   /** 人手动作＝派发命令表的命令（同角色 video_edit_run 那支 applyCommandsState）：成了 ⇒ 照人手改动入账（edit：罩期挡、主轨磁吸、收空轨、进复原栈）＋记命令账；
    *  罩着 ⇒ 提示一句·locked；命令不收（锁轨、没东西可改…）⇒ 什么都不动（调用方照原本的提示）。tracks＝命令套完、入账前那份（找新片段落在哪用） */
   const runCmd = useCallback((steps: CommandStep[]): { ok: true; tracks: T.Tracks; results: StepResult[] } | { ok: false; locked: boolean } => {
@@ -1116,6 +1139,7 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
   }, [playing, setNow])
   // 预览照轨道状态——隐藏的轨不画也不出声（元素停掉）·静音的轨照放但不出声·上面的画面轨盖下面的（layersAt 由上到下）
   const layers = T.layersAt(tracks, now)
+  setExprScene(tracks) // 表达式 clip('id') 找片段用（预览、面板、汇出同一份场景）
   const layerMedia = (s: T.LayerState) => (s.hit ? media.find((m) => m.id === s.hit!.clip.mediaId) ?? null : null)
   const topVisual = T.topVisualAt(tracks, now)
   useEffect(() => {
@@ -2096,8 +2120,9 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
   useEffect(() => { setUploadedProgs(listUploadedPrograms()) }, [])
   /** 这个包现在拿得到的本体（内建当场有·上传的读过才有·读不到 ⇒ null） */
   const programBundleOf = useCallback((id: string): ProgramBundle | null => builtinProgram(id) ?? progBundlesRef.current[id] ?? null, [])
-  // 汇出成片：素材原档（本机储存·汇出用原档）＋现在播放的那份＋程序包
-  exportEnvRef.current = () => ({ tracks: tracksRef.current, mediaOf: (id) => mediaOf(id) ?? null, originalOf: async (id) => { const m = mediaOf(id); return filesRef.current.get(id) ?? (m ? await host.media.readOriginal(m, projRef.current?.id ?? null) : null) }, programOf: programBundleOf })
+  // 汇出成片：素材原档（本机储存·汇出用原档）＋现在播放的那份＋程序包；轨道＝眼前这一层（在合成里 ⇒ 汇出／角色看帧都是这份合成·
+  //   同 AE 汇出当下合成·比例、播放头本来就跟这一层）＋全部合成（合成段要它·存档另走 projectNow 的整份）
+  exportEnvRef.current = () => ({ tracks: tracksRef.current, comps: wholeNow().comps, mediaOf: (id) => mediaOf(id) ?? null, originalOf: async (id) => { const m = mediaOf(id); return filesRef.current.get(id) ?? (m ? await host.media.readOriginal(m, projRef.current?.id ?? null) : null) }, programOf: programBundleOf })
   // 轨道上用到、还没读过的上传包 ⇒ 读本机储存（读不到记 null·画面写「找不到」）
   const progIdsInUse = [...new Set(T.allClips(tracks).map((c) => c.program?.pkg).filter((x): x is string => !!x && !builtinProgram(x)))].sort().join(',')
   useEffect(() => {
@@ -2624,12 +2649,18 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
   }
   const tsPanel = tsSel ? <VeditFollowPinPanel key={tsSel.clip.id} clip={liveClip(tsSel.clip, tsSel.lane.kind)} tracks={tracks} now={now} onPatch={onTsPatch} onBind={onTsBind} onCancel={() => setClipLive(null)} /> : null
   const mtHost: MTrackHost = { selecting: mtSel, setSelecting: (v) => { setMtSel(v); if (v) setMosaicRec(false) }, box: mtBox, run: mtRun, onStart: (dir, into) => { void onMtStart(dir, into) }, onCancel: () => mtAbort.current?.abort() }
-  const clipPanel = clipState.kind === 'clip'
-    ? <VeditClipInspector key={clipState.ids.join(',')} host={{ state: { ...clipState, clip: liveClip(clipState.clip, clipState.lane) }, mtrack: mtHost, matteLanes: tracks.filter((l) => l.kind === 'text' || l.kind === 'sticker').map((l, i) => ({ id: l.id, label: `${t(l.kind === 'text' ? 'vedit_ci_matte_lane_text' : 'vedit_ci_matte_lane_sticker')} ${i + 1}` })), onPatch: onClipPatch, onCancel: () => setClipLive(null), stageRatio: stageRatioRef.current ?? undefined, now, onSeek: seekTimeline, srcRatio: srcRatioOf(clipState.clip), ...(clipState.lane === 'visual' && (clipState.media === 'video' || clipState.media === 'image') ? { push: pushHost } : {}), mosaic: { rec: mosaicRec, setRec: setMosaicRec, active: mosaicActive, setActive: setMosaicActive } }} />
-    : tsSel?.lane.kind === 'sticker' ? <div className="h-full overflow-y-auto p-2.5 bg-neutral-900 text-neutral-200 text-xs" data-testid="vedit-sticker-panel">{tsPanel}</div>
+  // 父层／3D／表达式（与摄影机、灯光的栏）：选中能设父层的那段 ⇒ 面板接在各自属性面板下面；空物件／摄影机／灯光／形状只有这一块
+  const rigSel = (() => { const id = sel[sel.length - 1]; const f = id ? T.findClip(tracks, id) : null; return f && !f.lane.locked && canChild(f.clip, f.lane.kind) ? f : null })()
+  const rigPanel = rigSel ? <VeditRigPanel key={`rig:${rigSel.clip.id}`} clip={rigSel.clip} lane={rigSel.lane.kind} tracks={tracks} now={now} onPatch={(p: RigPatch) => edit(patchRigClip(tracksRef.current, rigSel.clip.id, p))} nameOf={(c) => mediaOf(c.mediaId)?.name ?? c.id} /> : null
+  const clipPanel0 = clipState.kind === 'clip'
+    ? <VeditClipInspector key={clipState.ids.join(',')} host={{ state: { ...clipState, clip: liveClip(clipState.clip, clipState.lane) }, mtrack: mtHost, matteLanes: tracks.filter((l) => (l.kind === 'text' || l.kind === 'sticker' || l.kind === 'visual') && !l.clips.some((x) => x.id === clipState.clip.id)).map((l, i) => ({ id: l.id, label: `${t(l.kind === 'text' ? 'vedit_ci_matte_lane_text' : l.kind === 'sticker' ? 'vedit_ci_matte_lane_sticker' : 'vedit_ci_matte_lane_visual')} ${i + 1}` })), onPatch: onClipPatch, onCancel: () => setClipLive(null), stageRatio: stageRatioRef.current ?? undefined, now, onSeek: seekTimeline, srcRatio: srcRatioOf(clipState.clip), ...(clipState.lane === 'visual' && (clipState.media === 'video' || clipState.media === 'image') ? { push: pushHost } : {}), mosaic: { rec: mosaicRec, setRec: setMosaicRec, active: mosaicActive, setActive: setMosaicActive } }} />
+    : tsSel?.lane.kind === 'sticker' ? <div className="h-full overflow-y-auto p-2.5 bg-neutral-900 text-neutral-200 text-xs" data-testid="vedit-sticker-panel">{tsPanel}{rigPanel}</div>
       : bgSel ? <VeditBgfxPanel key={bgSel.clip.id} body={bgSel.clip.bgfx!} onPatch={(p) => edit(patchBgfx(tracksRef.current, bgSel.clip.id, p))} /> : null
+  const clipPanel = clipPanel0 && rigPanel && tsSel?.lane.kind !== 'sticker'
+    ? <div className="h-full flex flex-col min-h-0"><div className="flex-1 min-h-0">{clipPanel0}</div><div className="shrink-0 max-h-[45%] overflow-y-auto border-t border-neutral-800 bg-neutral-900">{rigPanel}</div></div>
+    : clipPanel0 ?? (rigPanel && !tsSel ? <div className="h-full overflow-y-auto bg-neutral-900">{rigPanel}</div> : null)
   const textKfClip = manualState.kind === 'text' ? T.findClip(tracks, manualState.ids[manualState.ids.length - 1])?.clip ?? null : null
-  const manualHost = { state: manualState, onPatch: onTextPatch, onCancel: () => setTextLive(null), clipPanel, kf: textKfClip ? { clip: textKfClip, now, onSeek: seekTimeline, onOp: onTextKf } : undefined, ...(host.tts ? { tts: (text: string) => host.tts!.renderPanel(text, { busy: ttsBusy, msg: ttsMsg, onRun: (o) => { void runTts(o) } }) } : {}), extra: tsSel?.lane.kind === 'text' ? tsPanel : undefined }
+  const manualHost = { state: manualState, onPatch: onTextPatch, onCancel: () => setTextLive(null), clipPanel, kf: textKfClip ? { clip: textKfClip, now, onSeek: seekTimeline, onOp: onTextKf } : undefined, ...(host.tts ? { tts: (text: string) => host.tts!.renderPanel(text, { busy: ttsBusy, msg: ttsMsg, onRun: (o) => { void runTts(o) } }) } : {}), extra: tsSel?.lane.kind === 'text' ? tsPanel : undefined, rig: tsSel?.lane.kind === 'text' ? rigPanel : undefined }
 
   // ── 每段音量：片段里一条横向音量线·拖上拖下调这一段（多选时一起调·0～1000%·拖时旁边即时显示数字）·双击回 100%；锁了的轨只看不拖 ──
   const sounding = useCallback((c: T.TlClip) => T.hasSound(c, kindOfMedia), [kindOfMedia])
@@ -2761,7 +2792,8 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
       const { thr, release } = snapThresholds(px, pref.snap && !(pref.magnet && mainUnlocked && d.mode === 'l' && d.lane === T.MAIN_LANE)) // 磁吸拉主轨片头：片头留在原位·不吸
       const pts = [...T.snapPoints(d.base, nowRef.current, d.mode === 'move' ? new Set(d.ids) : d.clip.id), ...markersOf(d.base)]
       const src = mediaOf(d.clip.mediaId)
-      const srcDur = !src || src.kind === 'image' ? Infinity : src.duration
+      const dcp = d.clip.comp ? compsRef.current[d.clip.comp] : undefined // 合成段：拉到合成尾为止
+      const srcDur = dcp ? compDuration(dcp) : !src || src.kind === 'image' ? Infinity : src.duration
       d.copied = d.mode === 'move' && e.altKey
       const laneShift = d.base.findIndex((l) => l.id === toLane) - d.base.findIndex((l) => l.id === d.lane)
       const newLaneId = (from: string) => { let id = d.newLanes.get(from); if (!id) { id = uid(); d.newLanes.set(from, id) } return id }
@@ -2936,6 +2968,32 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
     e.preventDefault()
     setMenu({ x: e.clientX, y: e.clientY, ids: [] })
   }
+  // ── 巢状合成：打包成合成（AE Pre-compose）·双击合成段进去改·面包屑回上一层 ──
+  /** 选中那几段打包成一份新合成（原位置换一段合成段·一步复原退得回轨道；合成留在清单里） */
+  const precompNow = (ids: readonly string[]) => {
+    if (aiLockedRef.current) { aiNoteRef.current(); return }
+    const compId = uid()
+    const r = precompose(tracksRef.current, ids, { compId, clipId: uid(), newId: uid, name: `${t('vedit_comp_name')} ${Object.keys(compsRef.current).length + 1}` })
+    if (!r) return
+    putComps({ ...compsRef.current, [compId]: r.comp })
+    edit(r.tracks)
+    setSel([r.clipId])
+  }
+  /** 换到第 k 层（0＝主时间轴·眼前这层先写回）·id 给了 ⇒ 再往下进那份合成 */
+  const goLevel = (k: number, id?: string) => {
+    const path = compPathRef.current
+    if (path.length) { const cur = path[path.length - 1], c = compsRef.current[cur]; if (c) putComps({ ...compsRef.current, [cur]: { ...c, tracks: tracksRef.current } }) }
+    else rootTracksRef.current = tracksRef.current
+    const next = [...path.slice(0, k), ...(id ? [id] : [])]
+    if (id && (path.includes(id) || !compsRef.current[id])) return
+    compPathRef.current = next
+    setCompPath(next)
+    const lv = next.length ? compsRef.current[next[next.length - 1]].tracks : rootTracksRef.current
+    histRef.current = T.EMPTY_HIST
+    tracksRef.current = lv; setTracks(lv); setHistTick((n) => n + 1)
+    setSel([]); seekTimeline(0)
+  }
+  const enterComp = (id: string) => goLevel(compPathRef.current.length, id)
   const runMenu = (act: T.MenuAct, ids: readonly string[]) => {
     setMenu(null)
     switch (act) {
@@ -2957,6 +3015,7 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
       case 'ungroup': runCmd([{ command: 'clip.ungroup', params: { clips: ids.filter((id) => T.editable(tracksRef.current, id)) } }]); break
       case 'subclip': void makeSubClip(ids); break
       case 'merge': void mergeClips(ids); break
+      case 'precomp': precompNow(ids); break
       case 'freeze': freezeNow(ids); break
       case 'reverse': reverseNow(ids); break
       case 'mirror': mirrorNow(ids); break
@@ -3107,6 +3166,9 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
   useEffect(() => { try { setRatioSel(parseRatio(window.localStorage.getItem(VEDIT_RATIO_KEY))) } catch { /* 读不到用「适应」 */ } }, [])
   const changeRatio = useCallback((v: RatioSel) => {
     if (aiLockedRef.current) { aiNoteRef.current(); return }
+    // 正在合成里改 ⇒ 改的是这份合成的比例（主时间轴的不动）
+    const path = compPathRef.current
+    if (path.length) { const cur = path[path.length - 1], c = compsRef.current[cur]; if (c) putComps({ ...compsRef.current, [cur]: { ...c, ratio: v } }); return }
     setRatioSel(v)
     try { window.localStorage.setItem(VEDIT_RATIO_KEY, JSON.stringify(v)) } catch { /* 存不进只影响下次开页 */ }
   }, [])
@@ -3149,7 +3211,10 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
     return () => ro.disconnect()
   }, [gate])
   const fitAspectNow = fitRef ? fitAspectOf(fitKey ? aspects[fitKey] : null, pvAspect[fitRef.id]) : null
-  const stageRatio = ratioOf(ratioSel, fitAspectNow)
+  // 合成里：画面比例照这份合成（适应＝跟主时间轴一样）
+  const rootStageRatio = ratioOf(ratioSel, fitAspectNow)
+  const levelComp = compPath.length ? comps[compPath[compPath.length - 1]] : undefined
+  const stageRatio = levelComp ? compAspect(levelComp, rootStageRatio ?? 16 / 9) : rootStageRatio
   stageRatioRef.current = stageRatio
   const playerRef = useRef<HTMLDivElement>(null)
   const [isFull, setIsFull] = useState(false)
@@ -3334,7 +3399,8 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
   ratioRef.current = ratioSel
   /** 页面现况 ⇒ 工程档内容（用到的上传程序包一并内嵌·换台电脑也找得到·合计超过上限的不嵌） */
   const projectNow = useCallback((): VeditProject => {
-    const used = [...new Set(T.allClips(tracksRef.current).map((c) => c.program?.pkg).filter((x): x is string => !!x && x.startsWith('u-')))].sort()
+    const whole = wholeNow()
+    const used = [...new Set([whole.tracks, ...Object.values(whole.comps).map((c) => c.tracks)].flatMap(T.allClips).map((c) => c.program?.pkg).filter((x): x is string => !!x && x.startsWith('u-')))].sort()
     const programs: Record<string, ProjectProgram> = {}
     let size = 0
     for (const k of used) {
@@ -3344,8 +3410,8 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
       if (size > VEDIT_PROGRAMS_EMBED_MAX) break
       programs[k] = { manifest: b.manifest, html: b.html }
     }
-    return buildProject({ ratio: ratioRef.current, tracks: tracksRef.current, media: mediaRef.current, programs })
-  }, [])
+    return buildProject({ ratio: ratioRef.current, tracks: whole.tracks, media: mediaRef.current, programs, comps: whole.comps })
+  }, [wholeNow])
   /** （照剪映「本地草稿」格子）：这份的卡片＝总长＋封面（第一段画面素材那一格的缩图·同一格只画一次·画不出 ⇒ 没封面＝黑底） */
   const coverCacheRef = useRef<{ key: string; cover: string | null } | null>(null)
   const cardNow = useCallback(async (): Promise<{ duration: number; cover: string | null }> => {
@@ -3403,6 +3469,14 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
     }
     if (addedProg) setProgBundles(progBundlesRef.current)
     // 命令化第二期：那批连比例一起换 ⇒ 比例记进比例帐（Ctrl+Z 退掉角色那批时比例一起回）
+    // 巢状合成：换上那份的合成清单；正在合成里改 ⇒ 那份还在就留在里面（眼前换成那份合成的轨道·主时间轴存起来）·不在了／开新档 ⇒ 回主时间轴
+    const nextComps = p.comps ?? {}
+    putComps(nextComps)
+    const path = compPathRef.current
+    if (path.length) {
+      if (mode !== 'open' && path.every((id) => nextComps[id])) { rootTracksRef.current = p.tracks; p = { ...p, tracks: nextComps[path[path.length - 1]].tracks } }
+      else { compPathRef.current = []; setCompPath([]) }
+    }
     if (mode !== 'open') PC.noteRemoteRatio(ratioLedgerRef.current, { tracks: tracksRef.current, ratio: ratioRef.current }, p.ratio)
     if (mode !== 'open') commitRemoteTracks(p.tracks) // 角色／别处改的、回复的历史版本：罩期也要换上（不走人手那道闸）·进复原栈
     else { histRef.current = T.EMPTY_HIST; tracksRef.current = T.pruneLanes(p.tracks); setTracks(tracksRef.current); setHistTick((n) => n + 1) }
@@ -3411,7 +3485,7 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
     for (const m of list) if (m.url && (!m.proxied || !m.stored)) prepare(m.id)
     for (const m of list) autoUploadIfOn(m.id)
     return list
-  }, [mediaFromProject, commitRemoteTracks, prepare, autoUploadIfOn])
+  }, [mediaFromProject, commitRemoteTracks, prepare, autoUploadIfOn, putComps])
   const syncHead = useCallback((d: { id: string; title: string; folder_id: string | null }) => {
     if (projRef.current && (projRef.current.title !== d.title || projRef.current.folderId !== d.folder_id)) setProj({ id: d.id, title: d.title, folderId: d.folder_id })
     projFolderRef.current = d.folder_id
@@ -3634,7 +3708,7 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
     })()
   }, [gate]) // eslint-disable-line react-hooks/exhaustive-deps
   // 改了停手 1.2 秒自动存（内容真的变了才送·上传进度这类暂时栏位不算）
-  const projKey = useMemo(() => (projState === 'ready' ? JSON.stringify(buildProject({ ratio: ratioSel, tracks, media, programs: {} })) + Object.keys(progBundles).join(',') : ''), [projState, ratioSel, tracks, media, progBundles])
+  const projKey = useMemo(() => (projState === 'ready' ? JSON.stringify(buildProject({ ratio: ratioSel, tracks, media, programs: {}, comps })) + Object.keys(progBundles).join(',') : ''), [projState, ratioSel, tracks, media, progBundles, comps])
   useEffect(() => {
     if (!projKey) return
     if (JSON.stringify(projectNow()) !== projSavedRef.current) host.project.dirty(true)
@@ -3991,12 +4065,13 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
             const stk = c.sticker ? stickerById(c.sticker.sticker) : null
             const flc = c.filter ? filterById(c.filter.filter) : null
             const prb = c.program ? programBundleOf(c.program.pkg) : null
-            const tone = c.text ? 'bg-amber-700/85' : c.sticker ? 'bg-pink-700/85' : c.filter ? 'bg-indigo-700/85' : c.adjust ? 'bg-sky-700/85' : c.program ? 'bg-teal-700/85' : c.shape ? 'bg-rose-700/85' : c.solid ? 'bg-neutral-600/85' : c.bgfx ? 'bg-violet-800/85' : ln.kind === 'audio' || m?.kind === 'audio' ? 'bg-emerald-800/85' : m?.kind === 'image' ? 'bg-violet-800/85' : 'bg-cyan-800/85'
+            const tone = c.text ? 'bg-amber-700/85' : c.sticker ? 'bg-pink-700/85' : c.filter ? 'bg-indigo-700/85' : c.adjust ? 'bg-sky-700/85' : c.program ? 'bg-teal-700/85' : c.shape ? 'bg-rose-700/85' : c.solid ? 'bg-neutral-600/85' : c.bgfx ? 'bg-violet-800/85' : c.rig ? 'bg-fuchsia-900/85' : c.comp ? 'bg-orange-800/85' : ln.kind === 'audio' || m?.kind === 'audio' ? 'bg-emerald-800/85' : m?.kind === 'image' ? 'bg-violet-800/85' : 'bg-cyan-800/85'
             const loud = sounding(c) // 有声音的片段（影片、音频·声音没分离出去）才画波形与音量线
             const g = T.clipGain(c)
             const wPx = Math.max(4, c.length * pxPerSec)
             return (
-              <div key={c.id} data-testid="vedit-clip" data-kind={c.text ? 'text' : c.sticker ? 'sticker' : c.filter ? 'filter' : c.adjust ? 'adjust' : c.program ? 'program' : c.shape ? 'shape' : c.solid ? 'solid' : c.bgfx ? 'bgfx' : m?.kind} data-clip-id={c.id} data-picked={on ? '1' : '0'}
+              <div key={c.id} data-testid="vedit-clip" data-kind={c.text ? 'text' : c.sticker ? 'sticker' : c.filter ? 'filter' : c.adjust ? 'adjust' : c.program ? 'program' : c.shape ? 'shape' : c.solid ? 'solid' : c.bgfx ? 'bgfx' : c.rig ? `rig-${c.rig.kind}` : c.comp ? 'comp' : m?.kind} data-clip-id={c.id} data-picked={on ? '1' : '0'}
+                onDoubleClick={c.comp ? (e) => { e.stopPropagation(); enterComp(c.comp!) } : undefined} data-comp={c.comp ?? undefined}
                 data-muted={c.muted ? '1' : '0'} data-disabled={c.disabled ? '1' : '0'} data-detached={c.detached ? '1' : '0'} data-group={c.group ?? ''}
                 onPointerDown={onClipDown(ln, c, 'move')} onContextMenu={onClipMenu(ln, c)} onPointerDownCapture={tool === 'blade' ? onBladeDown(ln, c) : undefined}
                 className={`group isolate absolute top-2 bottom-2 rounded overflow-hidden flex items-center text-[11px] touch-none ${ln.locked ? 'cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'} ${ln.hidden || c.disabled || landSet.has(c.id) ? 'opacity-40' : ''} ${landSet.has(c.id) ? 'outline-dashed outline-1 outline-white/70' : ''} ${tone} ${on ? 'ring-2 ring-white z-10' : ''}`} data-landing={landSet.has(c.id) ? '1' : undefined}
@@ -4014,6 +4089,8 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
                   className="absolute top-0.5 right-2.5 z-[1] px-1 rounded bg-black/55 text-[10px] leading-4 text-amber-200 pointer-events-none">✦{c.fx.length}</span>}
                 {/*  曲线变速：左下角小标；关键帧：选中的段在条上画小菱形（剪映同）·点一下播放头跳过去 */}
                 {c.curve && <span data-testid="vedit-clip-curve" data-curve={c.curve.id} title={t('vedit_ci_sub_speed_curve')} className="absolute bottom-0.5 left-1 z-[1] px-0.5 rounded bg-black/55 text-[10px] leading-4 text-cyan-200 pointer-events-none">∿{Math.round(T.speedOf(c) * 10) / 10}x</span>}
+                {/* 父层／3D／表达式：右下角小标（⤴＝有父层·3D·ƒ＝挂了表达式） */}
+                {(c.parent || c.d3 || c.expr) && <span data-testid="vedit-clip-rig" title={t('vedit_rig_panel')} className="absolute bottom-0.5 right-2.5 z-[1] px-0.5 rounded bg-black/55 text-[10px] leading-4 text-fuchsia-200 pointer-events-none">{`${c.parent ? '⤴' : ''}${c.d3 ? '3D' : ''}${c.expr ? 'ƒ' : ''}`}</span>}
                 {on && c.kf && clipKfTimes(c).map((kt) => (
                   <button key={kt} type="button" data-testid="vedit-clip-kf" data-t={kt} title={t('vedit_ci_kf')} aria-label={t('vedit_ci_kf')}
                     onPointerDown={(e) => { e.stopPropagation(); seekTimeline(kt) }}
@@ -4051,7 +4128,7 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
                     {loud && g !== 1 && <span className="px-1 rounded bg-black/40 text-[9px] tabular-nums" data-testid="vedit-clip-vol-badge">{T.volumeLabel(g)}</span>}
                   </span>
                 )}
-                <span className={`relative px-2 truncate pointer-events-none ${loud ? 'self-start leading-4 mt-0.5' : ''} ${c.disabled ? 'line-through' : ''}`}>{c.text ? `T ${c.text.content}` : stk ? stk.name[language === 'zh-CN' ? 'cn' : language === 'en' ? 'en' : 'tw'] : flc ? `${flc.name[language === 'zh-CN' ? 'cn' : language === 'en' ? 'en' : 'tw']} ${Math.round((filterLive?.id === c.id ? filterLive.strength : c.filter!.strength) * 100)}%` : c.program ? (prb ? l10n(prb.manifest.name, language as ProgLang) : t('vedit_lane_program')) : c.adjust ? `◐ ${t('vedit_adjust_layer')}` : c.shape ? `◇ ${t(SHAPE_LABEL[c.shape.shape])}` : c.solid ? `■ ${t('vedit_solid')} ${c.solid.color}` : c.bgfx ? `✦ ${t(BGFX_LABEL[c.bgfx.kind])}` : m?.name}</span>
+                <span className={`relative px-2 truncate pointer-events-none ${loud ? 'self-start leading-4 mt-0.5' : ''} ${c.disabled ? 'line-through' : ''}`}>{c.text ? `T ${c.text.content}` : stk ? stk.name[language === 'zh-CN' ? 'cn' : language === 'en' ? 'en' : 'tw'] : flc ? `${flc.name[language === 'zh-CN' ? 'cn' : language === 'en' ? 'en' : 'tw']} ${Math.round((filterLive?.id === c.id ? filterLive.strength : c.filter!.strength) * 100)}%` : c.program ? (prb ? l10n(prb.manifest.name, language as ProgLang) : t('vedit_lane_program')) : c.adjust ? `◐ ${t('vedit_adjust_layer')}` : c.shape ? `◇ ${t(SHAPE_LABEL[c.shape.shape])}` : c.solid ? `■ ${t('vedit_solid')} ${c.solid.color}` : c.bgfx ? `✦ ${t(BGFX_LABEL[c.bgfx.kind])}` : c.rig ? (c.rig.kind === 'null' ? `▢ ${t('vedit_rig_null')}` : c.rig.kind === 'camera' ? `◉ ${t('vedit_rig_camera')}` : `☀ ${t('vedit_rig_light')}`) : c.comp ? `▣ ${comps[c.comp]?.name ?? c.comp}` : m?.name}</span>
                 {/* 拉两端修剪；锁了的轨不给拉 */}
                 {!ln.locked && <>
                   <div data-testid="vedit-clip-trim-l" onPointerDown={onClipDown(ln, c, 'l')}
@@ -4240,7 +4317,7 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
             <p className="flex-1 p-4 text-xs text-neutral-500 text-center leading-relaxed" data-testid="vedit-skill-pane">{t('vedit_skill_empty')}</p>
           ) : isAssetTab(topTab) ? (
             <VeditAssetPane tab={topTab} sideW={shown.driveW} notice={notice} fancy={{ onPick: pickFancy, active: fancyActive }} textNew={{ onDefault: addPlainText, onImport: (f) => { void importSubtitles(f) } }}
-                asr={<VeditAsrPane host={{ avail: asrAvailability({ webgpu: asrGpu, host: asrModelSrc }), phase: asrPhase, hasSel: asrHasSel, onStart: (s, l) => { void startAsr(s, l) }, onCancel: cancelAsr, ...(host.shell ? { shell: { devices: mediaDevs, phase: shellAsr, onRun: (d, s, l) => { void startShellAsr(d, s, l) }, onCancel: cancelShellAsr, picker: host.shell.renderPicker } } : {}), ...(cloudAsr ? { cloud: { quota: cloudLeft, phase: cloudPhase, estimate: cloudEstimate, onRun: (s, l, x) => { void startCloudAsr(s, l, x) }, onCancel: cancelCloudAsr } } : {}) }} />} vector={{ onShape: (k) => pickVector(newShapeClip(crypto.randomUUID(), k)), onSolid: (col) => pickVector(newSolidClip(crypto.randomUUID(), col)), onBgfx: (k) => pickVector(newBgfxClip(crypto.randomUUID(), k, bgfxSeed(Math.random()))) }} sticker={{ onPick: pickSticker, favs: favs.sticker, onFav: (id) => flipFav('sticker', id) }}
+                asr={<VeditAsrPane host={{ avail: asrAvailability({ webgpu: asrGpu, host: asrModelSrc }), phase: asrPhase, hasSel: asrHasSel, onStart: (s, l) => { void startAsr(s, l) }, onCancel: cancelAsr, ...(host.shell ? { shell: { devices: mediaDevs, phase: shellAsr, onRun: (d, s, l) => { void startShellAsr(d, s, l) }, onCancel: cancelShellAsr, picker: host.shell.renderPicker } } : {}), ...(cloudAsr ? { cloud: { quota: cloudLeft, phase: cloudPhase, estimate: cloudEstimate, onRun: (s, l, x) => { void startCloudAsr(s, l, x) }, onCancel: cancelCloudAsr } } : {}) }} />} vector={{ onShape: (k) => pickVector(newShapeClip(crypto.randomUUID(), k)), onSolid: (col) => pickVector(newSolidClip(crypto.randomUUID(), col)), onBgfx: (k) => pickVector(newBgfxClip(crypto.randomUUID(), k, bgfxSeed(Math.random()))), onRig: (k) => pickVector(k === 'null' ? newNullClip(crypto.randomUUID()) : k === 'camera' ? newCameraClip(crypto.randomUUID()) : newLightClip(crypto.randomUUID(), 'point')) }} sticker={{ onPick: pickSticker, favs: favs.sticker, onFav: (id) => flipFav('sticker', id) }}
               filter={{ onPick: pickFilter, favs: favs.filter, onFav: (id) => flipFav('filter', id), selected: selFilter, onStrength: onFilterStrength }}
               fx={{ ...fxHost, favs: favs.fx, onFav: (id) => flipFav('fx', id) }} transition={{ ...trHost, favs: favs.transition, onFav: (id) => flipFav('transition', id) }}
               program={{ builtins: BUILTIN_PROGRAMS, uploaded: uploadedProgs, onPick: pickProgramClick, onUpload: uploadProgram, selected: selProgram, onParam: onProgramParam }} splitter={<Splitter dir="col" label={t('vedit_resize')} testid="vedit-split-asset" {...splitProps('drive')} />} audio={audioLib} />
@@ -4395,6 +4472,21 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
               const pinCss = (c: T.TlClip | null | undefined): string | null => { const H3 = c ? pinMatrix(lookOf(c, now).pin) : null; const w = sb?.w ?? pvBox.w, h = sb?.h ?? pvBox.h; return H3 && w > 0 && h > 0 ? pinCssMatrix(H3, w, h) : null }
               // 运动跟踪：文字／贴纸整层跟着路径走（followAt 同汇出）·套在四角透视外面；回 null＝不变形
               const tsCss = (c: T.TlClip): string | null => { const w = sb?.w ?? pvBox.w, h = sb?.h ?? pvBox.h; const fo = w > 0 && h > 0 ? followAt(tracks, c, now, w / h) : null; const pn = pinCss(c); const a = [fo ? followCssMatrix(fo, w, h) : '', pn ?? ''].filter(Boolean).join(' '); return a || null }
+              // 父子连结／3D（rigScene·汇出同一份）：每层外框再套 rigCssMatrix（2D 父链仿射／3D 投影）·灯光＝SVG feColorMatrix·景深＝blur·父链不透明度；
+              //   3D 层照远近排：有 3D 层时每条轨外框给 z-index＝排好的名次（DOM 顺序不动·影片元素不重挂）
+              const rigSc = rigScene(tracks, now, stageRatio ?? 16 / 9)
+              const rigW = sb?.w ?? pvBox.w, rigH = sb?.h ?? pvBox.h
+              const rigOf = (c: T.TlClip | null | undefined): RigOut | null => (c && rigSc.active ? rigSc.of(c) : null)
+              const rigRank = new Map<string, number>()
+              if (rigSc.active && layers.some((s) => s.show && s.hit && rigSc.of(s.hit.clip).is3d)) rigSc.order([...layers].reverse(), (s) => (s.lane.kind === 'audio' || s.lane.kind === 'filter' || !s.show || !s.hit || s.hit.clip.rig ? 'skip' : s.lane.kind === 'program' ? null : s.hit.clip)).forEach((s, i) => rigRank.set(s.lane.id, i + 1))
+              const rigFid = (c: T.TlClip) => `vedit-light-${c.id.replace(/[^A-Za-z0-9_-]/g, '')}`
+              const rigStyle = (s: { lane: T.Lane }, c: T.TlClip | null | undefined, base?: string | null): React.CSSProperties => {
+                const r = rigOf(c)
+                const tf = [r?.m && rigW > 0 && rigH > 0 ? rigCssMatrix(r.m, rigW, rigH) : '', base ?? ''].filter(Boolean).join(' ')
+                return { ...(tf ? { transform: tf } : {}), ...(r && r.alpha < 1 ? { opacity: r.alpha } : {}), ...(r?.hidden ? { visibility: 'hidden' as const } : {}), ...(rigRank.has(s.lane.id) ? { zIndex: rigRank.get(s.lane.id) } : {}) }
+              }
+              const rigFilter = (c: T.TlClip | null | undefined): string => { const r = rigOf(c); return r && c ? [r.shade ? `url(#${rigFid(c)})` : '', r.blur > 0 ? `blur(${(r.blur * rigH).toFixed(2)}px)` : ''].filter(Boolean).join(' ') : '' }
+              const rigSvg = (c: T.TlClip | null | undefined) => { const r = rigOf(c); return r?.shade && c ? <svg width="0" height="0" className="absolute" aria-hidden data-testid="vedit-rig-light-filter"><filter id={rigFid(c)} colorInterpolationFilters="sRGB"><feColorMatrix type="matrix" values={shadeMatrixValues(r.shade)} /></filter></svg> : null }
               return (
             <div data-testid="vedit-stage" data-ratio={sb ? stageRatio!.toFixed(4) : ''} onPointerDown={(e) => (mosaicRecRef.current ? onMosaicDown(e) : onPicDown(e))} data-mosaic-rec={mosaicRec ? '1' : '0'} data-mt-sel={mtSel ? '1' : '0'} data-push-sel={pushSel ? '1' : '0'} className={`${mosaicRec || mtSel || pushSel ? 'cursor-crosshair ' : ''}relative shrink-0 overflow-hidden bg-black flex items-center justify-center`}
               style={{ ...(sb && sb.w > 0 ? { width: sb.w, height: sb.h } : { width: '100%', height: '100%' }), containerType: 'size' }}>
@@ -4430,7 +4522,9 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
                       const on = sel.includes(c.id)
                       const still = !playing && !s.lane.locked && !aiLocked
                       return (
-                        <div key={s.lane.id} className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-text-layer" data-lane-id={s.lane.id} data-show="1" data-pin={pinCss(liveClip(c, s.lane.kind)) ? '1' : '0'} data-follow={c.follow && followAt(tracks, c, now) ? '1' : '0'} style={tsCss(liveClip(c, s.lane.kind)) ? { transform: tsCss(liveClip(c, s.lane.kind))! } : undefined}>
+                        <div key={s.lane.id} className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-text-layer" data-lane-id={s.lane.id} data-show="1" data-pin={pinCss(liveClip(c, s.lane.kind)) ? '1' : '0'} data-follow={c.follow && followAt(tracks, c, now) ? '1' : '0'} data-rig={rigOf(c)?.is3d ? '3d' : rigOf(c)?.m ? 'parent' : ''}
+                          style={{ ...rigStyle(s, c, tsCss(liveClip(c, s.lane.kind))), ...(rigFilter(c) ? { filter: rigFilter(c) } : {}) }}>
+                          {rigSvg(c)}
                           <div data-testid="vedit-text" data-clip-id={c.id} data-fancy={tb.fancy ?? ''} data-x={tb.x.toFixed(3)} data-y={tb.y.toFixed(3)} data-size={tb.size.toFixed(3)} title={t('vedit_text_edit_hint')}
                             onPointerDown={onTextDown(s.lane, c, 'move')} onDoubleClick={(e) => { e.stopPropagation(); if (still) setTextEdit({ id: c.id, value: tb.content }) }}
                             className={`absolute whitespace-pre select-none pointer-events-auto ${still || playing ? 'cursor-move' : ''} ${on ? 'outline outline-1 outline-white/80 outline-offset-2' : ''}`}
@@ -4461,7 +4555,9 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
                       // 贴纸动画：姿势同汇出（stickerPose·拖着时不叠动画·免得手下那张跑掉）
                       const sp = stickerDrag?.id === c.id ? null : stickerPose(sb, clipAnimPose(c, now))
                       return (
-                        <div key={s.lane.id} className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-sticker-layer" data-lane-id={s.lane.id} data-show="1" data-pin={pinCss(liveClip(c, s.lane.kind)) ? '1' : '0'} data-follow={c.follow && followAt(tracks, c, now) ? '1' : '0'} style={tsCss(liveClip(c, s.lane.kind)) ? { transform: tsCss(liveClip(c, s.lane.kind))! } : undefined}>
+                        <div key={s.lane.id} className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-sticker-layer" data-lane-id={s.lane.id} data-show="1" data-pin={pinCss(liveClip(c, s.lane.kind)) ? '1' : '0'} data-follow={c.follow && followAt(tracks, c, now) ? '1' : '0'} data-rig={rigOf(c)?.is3d ? '3d' : rigOf(c)?.m ? 'parent' : ''}
+                          style={{ ...rigStyle(s, c, tsCss(liveClip(c, s.lane.kind))), ...(rigFilter(c) ? { filter: rigFilter(c) } : {}) }}>
+                          {rigSvg(c)}
                           <div data-testid="vedit-sticker" data-clip-id={c.id} data-sticker-id={it.id} data-x={sb.x.toFixed(3)} data-y={sb.y.toFixed(3)} data-size={sb.size.toFixed(3)} title={t('vedit_sticker_edit_hint')}
                             onPointerDown={onStickerDown(s.lane, c, 'move')}
                             className={`absolute select-none ${playing ? 'pointer-events-none' : 'pointer-events-auto'} ${still ? 'cursor-move' : ''} ${on ? 'outline outline-1 outline-white/80 outline-offset-2' : ''}`}
@@ -4492,10 +4588,36 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
                       // 滤镜轨：本身不画东西·底下的画面轨各自套色（filterOverLayer）
                       return <div key={s.lane.id} className="hidden" data-testid="vedit-tl-filter-layer" data-lane-id={s.lane.id} data-show={s.show && s.hit?.clip.filter ? '1' : '0'} data-filter-id={s.show ? s.hit?.clip.filter?.filter ?? '' : ''} />
                     }
+                    if (s.lane.kind === 'visual' && s.hit?.clip.rig) {
+                      // 空物件／摄影机／灯光：成片不画；预览画空物件那个虚线框（照它的父链／3D 摆好）、灯光一个小点（rigScene·同汇出那份）
+                      const rc = s.hit.clip, q = s.show ? rigSc.nullQuad(rc) : null, dot = s.show ? rigSc.lightDot(rc) : null
+                      return (
+                        <div key={s.lane.id} className="absolute inset-0 pointer-events-none z-20" data-testid="vedit-tl-rig-layer" data-lane-id={s.lane.id} data-rig={rc.rig!.kind} data-show={s.show ? '1' : '0'}>
+                          {q && <svg className="absolute inset-0 w-full h-full overflow-visible" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden data-testid="vedit-null-box" data-clip-id={rc.id}><polygon points={q.map((p) => p.join(',')).join(' ')} fill="none" stroke={sel.includes(rc.id) ? '#f472b6' : '#f9a8d4'} strokeWidth={1.5} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" /></svg>}
+                          {dot && <span className="absolute w-2.5 h-2.5 -ml-[5px] -mt-[5px] rounded-full bg-yellow-300 border border-neutral-900" style={{ left: `${dot[0] * 100}%`, top: `${dot[1] * 100}%` }} data-testid="vedit-light-dot" data-clip-id={rc.id} />}
+                        </div>
+                      )
+                    }
+                    // 轨道遮罩：被拿来当遮罩的画面轨本身不显示（同汇出 framePlan·元素照挂着出声）
+                    const asMatte = s.show && matteLanesAt(tracks, now).has(s.lane.id)
                     if (s.lane.kind === 'visual' && (s.hit?.clip.shape || s.hit?.clip.solid || s.hit?.clip.bgfx)) {
                       // 形状／纯色：同汇出 drawVectorClip（VeditVectorCanvas 只是把它画进一张铺满预览的画布）
-                      return <div key={s.lane.id} className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-vector-layer" data-lane-id={s.lane.id} data-show={s.show ? '1' : '0'}>{s.show && <VeditVectorCanvas clip={s.hit!.clip} t={now} />}</div>
+                      const vcl = s.hit!.clip
+                      return <div key={s.lane.id} className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-vector-layer" data-lane-id={s.lane.id} data-show={s.show && !asMatte ? '1' : '0'} data-rig={rigOf(vcl)?.is3d ? '3d' : rigOf(vcl)?.m ? 'parent' : ''} style={{ ...rigStyle(s, vcl), ...(rigFilter(vcl) ? { filter: rigFilter(vcl) } : {}) }}>{rigSvg(vcl)}{s.show && !asMatte && <VeditVectorCanvas clip={s.hit!.clip} t={now} />}</div>
                     }
+                    // 合成段、拿画面层当遮罩的片段：整层照汇出那支画（PlanCanvas·只画这一段＋接缝另一边＋滤镜轨）·DOM 那层藏着（影片元素照放出声）
+                    const pc0 = s.show && !asMatte && s.hit ? liveClip(s.hit.clip, s.lane.kind) : null
+                    const viaPlan = !!pc0 && (!!pc0.comp || matteIsVisual(tracks, s.lane.id, pc0.look?.matte))
+                    const planOnly = viaPlan && pc0 ? [pc0.id, ...(fxStateAt(s.lane, now)?.trans?.other.clip.id ? [fxStateAt(s.lane, now)!.trans!.other.clip.id] : []), ...tracks.filter((l) => l.kind === 'filter').flatMap((l) => l.clips.map((x) => x.id))] : []
+                    const planBlend = viaPlan && pc0 ? lookOf(pc0, now).blend : 'normal'
+                    // 父链／3D 由 PlanCanvas 里那支 frameDrawer 自己套（rigScene·同汇出）·外框只给 3D 远近名次
+                    const planLayer = viaPlan && pc0 ? (
+                      <div className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-plan-layer" data-lane-id={s.lane.id} data-clip-id={pc0.id} data-comp={pc0.comp ?? ''} data-rig={rigOf(pc0)?.is3d ? '3d' : rigOf(pc0)?.m ? 'parent' : ''}
+                        style={{ ...(rigRank.has(s.lane.id) ? { zIndex: rigRank.get(s.lane.id) } : {}), ...(planBlend !== 'normal' ? { mixBlendMode: planBlend as React.CSSProperties['mixBlendMode'] } : {}) }}>
+                        <VeditPlanCanvas env={{ ...exportEnvRef.current!(), tracks: clipLive ? tracks.map((l) => ({ ...l, clips: l.clips.map((x) => liveClip(x, l.kind)) })) : tracks, comps }} t={now} only={planOnly} clipId={pc0.id} />
+                      </div>
+                    ) : null
+                    const hideDom = viaPlan || asMatte
                     const m = layerMedia(s)
                     const flt = s.show && m ? filterOverLayer(layers, s.lane.id) : null
                     // 这段身上的特效＋接缝窗内的转场（WebGL·VeditFxCanvas）；滤镜再套在它上面
@@ -4536,12 +4658,16 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
                     const glowF = s.show && lk ? glowCss(lk.glow) : null // 外发光（同汇出 glowLayer）
                     return (
                       <Fragment key={s.lane.id}>
+                      {planLayer}
+                      <div className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-dom-layer" data-hidden={hideDom ? '1' : '0'} style={hideDom ? { visibility: 'hidden' } : undefined}>
                       {/*  背景填充垫在这一层底下·铺满不跟着变形 */}
                       {lk?.bg && s.show && m?.url && <VeditBgFill bg={lk.bg} source={layerSource(s.lane.id)} />}
                       {/*  阴影：外框 drop-shadow（偏移不跟着里面那层的变形转·同汇出）·没阴影也留着这层框（免得开关阴影时影片元素重挂） */}
-                      <div className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-shadow" data-on={lk?.shadow ? '1' : '0'} data-matte={mtOp ? mtOp.laneId : ''} data-blend={blendOuter ?? ''} style={{ ...(lk?.shadow && s.show ? { filter: shadowCss(lk.shadow) } : {}), ...(blendOuter ? { mixBlendMode: blendOuter } : {}), ...(mtUrl ? { maskImage: mtUrl, WebkitMaskImage: mtUrl, maskSize: '100% 100%', WebkitMaskSize: '100% 100%', maskRepeat: 'no-repeat', WebkitMaskRepeat: 'no-repeat' } : {}) }}>
-                      {/*  外发光：阴影框里面再一层框（filter 串 drop-shadow·不跟着变形转·同汇出）·没开也留着（免得影片元素重挂） */}
-                      <div className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-glow" data-on={glowF ? '1' : '0'} style={glowF ? { filter: glowF } : undefined}>
+                      {/*  父子连结／3D：整层（连阴影）再套 rigCssMatrix·z-index 排远近（rigStyle） */}
+                      <div className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-shadow" data-on={lk?.shadow ? '1' : '0'} data-matte={mtOp ? mtOp.laneId : ''} data-blend={blendOuter ?? ''} data-rig={rigOf(vc)?.is3d ? '3d' : rigOf(vc)?.m ? 'parent' : ''} style={{ ...rigStyle(s, vc), ...(lk?.shadow && s.show ? { filter: shadowCss(lk.shadow) } : {}), ...(blendOuter ? { mixBlendMode: blendOuter } : {}), ...(mtUrl ? { maskImage: mtUrl, WebkitMaskImage: mtUrl, maskSize: '100% 100%', WebkitMaskSize: '100% 100%', maskRepeat: 'no-repeat', WebkitMaskRepeat: 'no-repeat' } : {}) }}>
+                      {/*  外发光：阴影框里面再一层框（filter 串 drop-shadow·不跟着变形转·同汇出）·没开也留着（免得影片元素重挂）；3D 灯光／景深接在外发光后面（同汇出：整层画好才打光） */}
+                      <div className="absolute inset-0 pointer-events-none" data-testid="vedit-tl-glow" data-on={glowF ? '1' : '0'} style={glowF || rigFilter(vc) ? { filter: [glowF ?? '', rigFilter(vc)].filter(Boolean).join(' ') } : undefined}>
+                      {rigSvg(vc)}
                       <div className={`absolute inset-0 flex items-center justify-center pointer-events-none ${s.show ? '' : 'invisible'}`} data-testid="vedit-tl-layer" data-lane-id={s.lane.id} data-show={s.show ? '1' : '0'}
                         data-look={vc?.look ? '1' : '0'} data-transform={ls?.transform ?? 'none'} data-mask={lk?.mask?.shape ?? ''} data-adj={adjId ? '1' : '0'}
                         style={{ ...(ls && ls.transform !== 'none' ? { transform: ls.transform } : {}), ...(ls && ls.opacity < 1 ? { opacity: ls.opacity } : {}), ...(ls && ls.mixBlendMode !== 'normal' && !blendOuter ? { mixBlendMode: ls.mixBlendMode } : {}),
@@ -4565,6 +4691,7 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
                         {ring && s.show && <div className="absolute pointer-events-none" data-testid="vedit-tl-border" style={borderCss(ring)} />}
                       </div>
                       {dirPlan && <VeditDirBlurCanvas key={`db:${s.lane.id}`} source={gradedSource(s.lane.id)} clock={timelineClock} plan={dirPlan} transform={pinTf} opacity={ls?.opacity} blend={ls?.mixBlendMode} />}
+                      </div>
                       </div>
                       </div>
                       </Fragment>
@@ -4675,7 +4802,7 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
             <div className="justify-self-end flex items-center gap-1.5">
               {/* 「快捷键」按钮拿掉·说明搬进左上角「设定」弹窗 */}
               {/* 照剪映：「比例」选单＋「全屏」 */}
-              <VeditRatioMenu value={ratioSel} onChange={changeRatio} />
+              <VeditRatioMenu value={levelComp?.ratio ?? ratioSel} onChange={changeRatio} />
               {/*  安全区（关→电视标准→抖音竖屏→关） */}
               <ToolBtn label={`${t('vedit_safe')}：${t(SAFE_MODE_LABEL[safeMode])}`} onClick={() => setSafeMode(nextSafeMode(safeMode))} testid="vedit-safe-btn" active={safeMode !== 'off'}>
                 <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4" aria-hidden><rect x="2.5" y="3.5" width="15" height="13" rx="1.5" /><rect x="5.5" y="6.5" width="9" height="7" strokeDasharray="2 1.5" /></svg>
@@ -4715,6 +4842,18 @@ function VideoEditEditor({ host }: { host: VideoPageHost }) {
               canMirror: sel.some((id) => { const f = T.findClip(tracks, id); return !!f && f.lane.kind === 'visual' && !f.lane.locked && !!f.clip.mediaId }), onMirror: () => mirrorNow(), onSolid: (k) => { void solidNow(k) }, onAdjust: adjustLayerNow }} />
           </div>
           {tool === 'blade' && <BladeCursorStyle />}
+          {/* 巢状合成：正在合成里改 ⇒ 面包屑（点哪层回哪层）·双击合成段进去 */}
+          {compPath.length > 0 && (
+            <nav className="flex items-center gap-1 min-w-0 text-xs" aria-label={t('vedit_comp_crumbs')} data-testid="vedit-comp-crumbs" data-depth={compPath.length}>
+              <button type="button" onClick={() => goLevel(0)} className="px-1.5 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200" data-testid="vedit-comp-crumb" data-level={0}>{t('vedit_comp_root')}</button>
+              {compPath.map((id, i) => (
+                <Fragment key={id}>
+                  <span className="text-neutral-500" aria-hidden>›</span>
+                  <button type="button" disabled={i === compPath.length - 1} onClick={() => goLevel(i + 1)} className={`px-1.5 py-0.5 rounded truncate max-w-[10rem] ${i === compPath.length - 1 ? 'bg-orange-800/70 text-[#ffffff]' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200'}`} data-testid="vedit-comp-crumb" data-level={i + 1}>▣ {comps[id]?.name ?? id}</button>
+                </Fragment>
+              ))}
+            </nav>
+          )}
           <div className="flex items-center gap-1">
             {/* （照剪映时间轴右上：左＝主轨磁吸、右＝自动吸附）·开着＝青色底 */}
             <TlToggle on={tlPrefs.magnet} onClick={toggleMagnet} label={t('vedit_magnet')} hint={t('vedit_magnet_hint')} state={t(tlPrefs.magnet ? 'vedit_switch_on' : 'vedit_switch_off')} testid="vedit-magnet">

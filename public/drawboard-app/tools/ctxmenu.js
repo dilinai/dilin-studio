@@ -121,6 +121,7 @@ const CtxMenu = window.CtxMenu = {
       SEP,
       pick('edit.freeTransform', N('任意變形', '自由变换', 'Free Transform')),
       pick('select.transformSelection', N('變形選取範圍', '变换选区', 'Transform Selection')),
+      pick('select.transformSelection.warp', N('變形選取範圍：彎曲…', '变换选区：变形…', 'Transform Selection: Warp…')),
       SEP,
       pick('edit.fill', N('填滿…', '填充…', 'Fill…')),
       pick('edit.stroke', N('筆畫…', '描边…', 'Stroke…')),

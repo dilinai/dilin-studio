@@ -62,13 +62,14 @@
 | `condFormats` | 条件格式规则 `[{ "id", "ranges": ["B2:B20"], "type", "value"?, "style"? }]`（`type`：`greater` `less` `between` `equal` `top` `bottom` `above_average` `duplicate` `unique` `text_contains` `color_scale` `data_bar`…；`color_scale`／`data_bar` 的 `colors` 可省 ⇒ 预设色（色阶红黄绿、数据条 `#638ec6`），条长按区里数字的最小～最大自动算） |
 | `charts` | `[{ "id", "type": "column|bar|line|pie|doughnut", "range": "A1:B5", "cell": "D2", "w", "h", "title"? }]` |
 | `print` | 列印设定（网页「列印」对话框存的·每张表各一份·省＝A4 直式、标准边界、不缩放、整张表）：`{ "scope": "sheet\|selection\|range", "range"?: "A1:F30", "paper": "A4\|A3\|Letter\|Legal\|B5", "orientation": "portrait\|landscape", "marginPreset": "normal\|narrow\|wide\|custom", "margins": { "top", "bottom", "left", "right", "header", "footer" }（公分）, "scaleMode": "none\|fitSheet\|fitCols\|fitRows\|custom", "scale": 10–400, "titleRows"?: "1:1", "titleCols"?: "A:A", "gridlines", "headings", "hCenter", "vCenter", "header"/"footer": { "l"?, "c"?, "r"?: "sheet\|title\|page\|date" } }` |
+| `hiddenRows` `hiddenCols` | `[2, 3]` 手动隐藏的列／栏（0 起编号：`0`＝第 1 列／A 栏）；跟 `filter` 筛掉的列分开存，清掉筛选不会放出来 |
 
 ### 格
 
 `{ "v": "原文", "f": "=公式", "s": { 格式 } }`，三个都可省（全省＝这格不存在）。
 
 - `v` 一律是**字串**：数字写 `"12.5"`；日期写 Excel 日期序号字串配日期格式，如 `{ "v": "46313", "s": { "numFmt": { "t": "date" } } }` ＝ 2026/10/18（写成 `"2026/10/18"` 会被当成文字显示）。
-- 有 `f` 的格，`v` 写 `""`；网页自己算。公式以 `=` 开头，支援常用函数（SUM、AVERAGE、IF、IFERROR、VLOOKUP、XLOOKUP、INDEX、MATCH、SUMIF、COUNTIF…）与 `$A$1` 绝对引用；只能引用同一张表的格（不支援 `Sheet2!A1` 跨表引用）。
+- 有 `f` 的格，`v` 写 `""`；网页自己算。公式以 `=` 开头，支援约 160 个 Excel 常用函数（SUM、IF、VLOOKUP、XLOOKUP、INDEX、MATCH、SUMIFS、COUNTIFS、TEXT、DATE、NETWORKDAYS、PMT…）、`$A$1` 绝对引用与 `Sheet2!A1` 跨表引用；一格算出整片的函数（FILTER、SORT、UNIQUE、SEQUENCE）与 LET、LAMBDA 不支援。
 
 ### 格式 `s`
 

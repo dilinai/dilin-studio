@@ -3,10 +3,11 @@
 //   滤镜、文字（text-draw）、贴纸、程序片段（看不见的沙盒 iframe·canvas 变成 ImageBitmap 传回来）；比例＝播放器比例（放不满补黑边）。
 // · 声音：照 mix.ts mixSubClip 混（OfflineAudioContext 48kHz）·编 AAC（浏览器没有 ⇒ @mediabunny/aac-encoder；再不行退 Opus；都没有 ⇒ 无声并明说）。
 // · 写去哪：缺 sink ⇒ 整份留在记忆体回 blob；给 sink ⇒ 边编边写进它（登入版「边编边传」用·sink 由调用方造）。
-import { EXPORT_FPS, EXPORT_FPS_OPTS, EXPORT_RES, EXPORT_SAMPLE_RATE, blendOp, resLabel, selectionRange, type ExportFps, containRect, exportNameDefault, exportNameFrom, exportProgress, exportSize, frameCount, frameTime, framePlan, otherTime, withCaptureBridge, withTimeout, guardStep, exportLatencyMode, ENCODER_STALL_MS, ENCODER_FINALIZE_MS, imageNeedsCors, SOURCE_READ_MS, IMAGE_LOAD_MS, audioBlockers, audioBlockerList, visualUses, visualBlockers, type DrawOp, type ExportRange, type ExportRes } from '../lib/export.pure'
+import { EXPORT_FPS, EXPORT_FPS_OPTS, EXPORT_RES, EXPORT_SAMPLE_RATE, blendOp, resLabel, selectionRange, type ExportFps, containRect, exportNameDefault, exportNameFrom, exportProgress, exportSize, frameCount, frameTime, framePlan, otherTime, withCaptureBridge, withTimeout, guardStep, exportLatencyMode, ENCODER_STALL_MS, ENCODER_FINALIZE_MS, imageNeedsCors, SOURCE_READ_MS, IMAGE_LOAD_MS, audioBlockers, audioBlockerList, visualUses, visualBlockers, compOtherTime, compShows, type DrawOp, type ExportRange, type ExportRes } from '../lib/export.pure'
 import { adjActive, bgBlurPx, clipAnimPose, cornerPx, cropBox, frameIn, lookGrade, lookOf, lookXform, masksSvg, shadowPx, borderRing, paintFramed, glowPx } from '../lib/clip-look.pure'
 import { drawMatteOps } from './matte-draw' // 轨道遮罩（同预览那支）
 import { pinMatrix, warpPixels, type Mat3 } from '../lib/corner-pin.pure' // 四角透视
+import { rigCanvasAffine, rigScene, shadePixels, type RigOut } from '../lib/rig.pure' // 父子连结／3D 摄影机灯光（同预览那份）
 import { followAffine, followAt } from '../lib/motion-track.pure' // 运动跟踪：跟随（同预览 followCssMatrix 那份）
 import { applyGradeLut, bakeGradeLut, gradeActive } from '../lib/grade.pure' // 调色抠像
 import { adjustPixels } from '../lib/adjust-px.pure'
@@ -47,6 +48,8 @@ import { encodeWav } from '../lib/wav'
 import { tracksToSrt } from '../lib/clip-ops.pure'
 import { alphaGate, alphaSampleFrame, exportSpec, hasTransparentPixel, makeOutputFormat, noTransparentArea, paintBackdrop, probeAlphaSupport, videoSourceConfig, type AlphaSupport, type ExportVideoCodec } from '../lib/export-alpha.pure' // 透明背景
 import { exportUrls } from '../lib/cloud-proxy.pure' // 出片读原档
+import { COMP_DEPTH_MAX, compPixelSize, flattenCompAudio, withCompAudioIds, type Comps } from '../lib/comp.pure' // 巢状合成
+import { matteAlpha } from '../lib/mask-matte.pure' // 画面层当轨道遮罩：逐像素同文字遮罩那支
 
 type MB = typeof import('mediabunny')
 type VideoSample = import('mediabunny').VideoSample
@@ -58,6 +61,7 @@ export type ExportMedia = { id: string; kind: MediaKindLike; url: string; durati
   /** url 是剪辑用小档（proxied）时·remote＝云盘原档链接（本机储存没原档 ⇒ 出片读它·⛔ 拿小档出片） */ proxied?: boolean; remote?: string }
 export type ExportEnv = {
   tracks: Tracks
+  /** 子合成（合成段要它·缺＝没有） */ comps?: Comps
   mediaOf: (id: string) => ExportMedia | null
   originalOf: (id: string) => Promise<Blob | null>
   programOf: (pkg: string) => ProgramBundle | null
@@ -320,7 +324,7 @@ async function mixForExport(env: ExportEnv, plan: NonNullable<ReturnType<typeof 
 /** 成片要画到的影片／图片逐份打开（同 frameDrawer 开档那条·开过的照用）；打不开 ⇒ 抛 code 'video_unreadable'（list＝白话清单） */
 async function preflightVisual(env: ExportEnv, fd: Awaited<ReturnType<typeof frameDrawer>>, range: ExportRange): Promise<void> {
   const kindOf = (id: string) => env.mediaOf(id)?.kind
-  const uses = visualUses(env.tracks, range, kindOf)
+  const uses = visualUses(env.tracks, range, kindOf, undefined, env.comps)
   const failed: string[] = []
   await Promise.all([...uses.keys()].map(async (id) => { if (!(await fd.probe(id))) failed.push(id) }))
   const bs = visualBlockers(failed, uses, (id) => { const m = env.mediaOf(id); return m ? { name: m.name ?? id, missing: m.missing } : undefined })
@@ -341,8 +345,10 @@ export async function renderVideo(env: ExportEnv, opts: RenderOpts): Promise<Ren
 
   // ① 声音：同合成子素材的混音（只算画得到的那几段·range.only）
   report('audio')
-  const ids = range.only ? [...range.only] : env.tracks.flatMap((l) => l.clips.map((c) => c.id))
-  const plan = subClipPlan(env.tracks, ids, kindOf)
+  // 合成段底下出声的段摊平到这条时间轴（flattenCompAudio·选中合成段 ⇒ 它摊出来的一起）
+  const aTracks = flattenCompAudio(env.tracks, env.comps)
+  const ids = range.only ? withCompAudioIds([...range.only], aTracks) : aTracks.flatMap((l) => l.clips.map((c) => c.id))
+  const plan = subClipPlan(aTracks, ids, kindOf)
   let audioBuf: AudioBuffer | null = null
   if (plan && plan.segs.length) {
     audioBuf = await mixForExport(env, plan, range.from, seconds, signal)
@@ -412,7 +418,7 @@ export async function renderVideo(env: ExportEnv, opts: RenderOpts): Promise<Ren
     if (buffered && !buf) throw new Error('empty output')
     report('done', total)
     // 编码途中才打不开的（预检时开得了·后来那份没了）⇒ 同样挡下·⛔ 交出缺段的片
-    const late = visualBlockers(fd.skippedIds(), visualUses(env.tracks, range, kindOf), (id) => { const m = env.mediaOf(id); return m ? { name: m.name ?? id, missing: m.missing } : undefined })
+    const late = visualBlockers(fd.skippedIds(), visualUses(env.tracks, range, kindOf, undefined, env.comps), (id) => { const m = env.mediaOf(id); return m ? { name: m.name ?? id, missing: m.missing } : undefined })
     if (late.length) throw Object.assign(new Error(audioBlockerList(late)), { code: 'video_unreadable', list: audioBlockerList(late) })
     // 核过了才送最后一片＋complete（⛔ 缺段的片先进了云盘）
     const blob = buf ? new Blob([buf], { type: spec.mime }) : tee!.commit(spec.mime)
@@ -447,7 +453,7 @@ function ensureAacEncoder(mb: MB): Promise<void> {
 /** 一帧一帧画时间轴（汇出成片与汇出静帧共用）：frame(t, only) 把时间轴第 t 秒画进 canvas（只画 only 那几段·缺＝全部）；
  *  素材来源每份开一次·每段一只解码游标（放完的段关掉）·每条轨一份 WebGL·每条程序轨一只 iframe；用完 dispose
  *  o.alpha（透明背景）：画布开透明、每帧先清空（⛔ 填黑底）·转场另一段的黑边也改透明 */
-export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alpha?: boolean } = {}) {
+export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alpha?: boolean; /** 第几层合成（主时间轴 0）·合成段另开的那只 +1 */ depth?: number } = {}) {
   await loadTextFonts(env.tracks) // 站上字体先载好·不然头几格会画成退回字体
   const mb: MB = await import('mediabunny')
   const kindOf = (id: string) => env.mediaOf(id)?.kind
@@ -456,7 +462,12 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
   const skip = (id: string) => { if (!skippedIds.has(id)) { skippedIds.add(id); skipped++ } }
   const spec = exportSpec(!!o.alpha)
   const canvas = mkCanvas(W, H)
-  const ctx = canvas.getContext('2d', { alpha: spec.canvasAlpha })!
+  const main = canvas.getContext('2d', { alpha: spec.canvasAlpha })!
+  /** 正在画的那张：平常＝成片画布；3D 层／父链带不透明度的层先画进 rigCv（drawRigged 换掉再换回） */
+  let ctx = main
+  /** 父子连结（2D）：这一层整层要再套的画布仿射（rig.pure·同预览 rigCssMatrix 那个矩阵）·没有 ⇒ null */
+  let rigM: [number, number, number, number, number, number] | null = null
+  let rigCv: ReturnType<typeof mkCanvas> | null = null, rigOutCv: ReturnType<typeof mkCanvas> | null = null
   /** 先铺底：不透明 ⇒ 黑；透明 ⇒ 清空 */
   const backdrop = (c: CanvasRenderingContext2D, w: number, h: number) => paintBackdrop(c, spec, w, h)
   // 素材来源（每份素材开一次）·每段一只游标·每条轨一份 WebGL·每条程序轨一只 iframe
@@ -515,6 +526,7 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
   const scratch = mkCanvas(), s2d = scratch.getContext('2d')!
   const otherCv = mkCanvas(), o2d = otherCv.getContext('2d')!
   const layerCv = mkCanvas(W, H), l2d = layerCv.getContext('2d', { willReadFrequently: true })! // 调节要读回像素
+  let mlCv: ReturnType<typeof mkCanvas> | null = null // 画面层当遮罩：先照平常画法画进这张再转遮罩
   const mtCv = mkCanvas(W, H), mt2d = mtCv.getContext('2d')!, mkCv = mkCanvas(W, H), mk2d = mkCv.getContext('2d', { willReadFrequently: true })! // 轨道遮罩：整层暂存＋遮罩
   // 四角透视：整层先画进 pinCv（照原本的位置／旋转）·再照 pinMatrix（同预览 pinCssMatrix 那个矩阵）逐像素投影进 pinOut·最后才带不透明度／混合贴上去
   let pinCv: ReturnType<typeof mkCanvas> | null = null, pinOut: ReturnType<typeof mkCanvas> | null = null
@@ -556,13 +568,43 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
     return cur.at(ts)
   }
 
+  // 合成段：每段（转场另一边也各一只）另开一只 frameDrawer 照那份合成的轨道画进透明画布（同一支画法·递归）·这一格没用到的关掉
+  type FD = Awaited<ReturnType<typeof frameDrawer>>
+  const compFds = new Map<string, Promise<FD | null>>()
+  const trackIds = new WeakMap<object, number>()
+  let trackN = 0
+  const trackId = (o: object) => { let v = trackIds.get(o); if (v === undefined) { v = ++trackN; trackIds.set(o, v) } return v }
+  const depth = o.depth ?? 0
+  const compFrame = async (key: string, compId: string | undefined, ts: number, used: Set<string>): Promise<HTMLCanvasElement | null> => {
+    const comp = compId ? env.comps?.[compId] : undefined
+    if (!comp || depth >= COMP_DEPTH_MAX) return null
+    // 合成内容换了（同一份轨道物件 ⇒ 同号）⇒ 另开一只（旧的这一格没用到·收尾关掉）；子那只的 env 照读这只的（合成清单、素材换了跟着）
+    const k2 = `${key}#${trackId(comp.tracks)}`
+    let p = compFds.get(k2)
+    if (!p) { const sz = compPixelSize(comp, W, H); p = frameDrawer(Object.create(env, { tracks: { value: comp.tracks } }) as ExportEnv, sz.w, sz.h, { alpha: true, depth: depth + 1 }).catch(() => null); compFds.set(k2, p) }
+    const fd = await p
+    if (!fd) return null
+    used.add(k2)
+    await fd.frame(ts)
+    for (const id of fd.skippedIds()) skip(id)
+    return fd.canvas
+  }
+
   /** 运动模糊：每段影片最近几格（没叠过的原格·时间轴时刻） */
   const mbHist = new Map<string, Array<{ t: number; cv: HTMLCanvasElement }>>()
   const mbUsed = new Set<string>()
-  const drawMedia = async (op: Extract<DrawOp, { kind: 'media' }>, t: number, used: Set<string>) => {
+  /** 当下要画的那张（drawRigged 会把 ctx 换成暂存那张）·drawMedia 缺 ctx 参数时取它 */
+  const curCtx = () => ctx
+  /** 画一层画面（影片／图片／合成段）进 ctx（缺＝当下那张·平常＝成片画布、3D／带不透明度父链＝暂存那张；画面层当遮罩时画进遮罩画布） */
+  const drawMedia = async (op: Extract<DrawOp, { kind: 'media' }>, t: number, used: Set<string>, ctx: CanvasRenderingContext2D = curCtx()) => {
     let src: CanvasImageSource | VideoSample | null = null
     let sw = 0, sh = 0
-    if (op.media === 'video') {
+    if (op.media === 'comp') {
+      // 合成段：出了合成长度 ⇒ 这一刻透明（不画）
+      const comp = op.comp ? env.comps?.[op.comp] : undefined
+      const cv = comp && compShows(op, comp) ? await compFrame(`c:${op.clip.id}`, op.comp, op.source, used) : null
+      if (cv) { src = cv; sw = cv.width; sh = cv.height }
+    } else if (op.media === 'video') {
       const s = await videoFrame(`c:${op.clip.id}`, op.mediaId, op.source, used)
       if (s) { src = s; sw = s.displayWidth; sh = s.displayHeight }
     } else {
@@ -577,14 +619,14 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
       const k = Math.min(1, FX_MAX_SIDE / Math.max(sw, sh))
       const gw = Math.max(1, Math.round(sw * k)), gh = Math.max(1, Math.round(sh * k))
       const gcv = mkCanvas(gw, gh), g2d = gcv.getContext('2d', { willReadFrequently: true })!
-      if (src instanceof HTMLImageElement) g2d.drawImage(src, 0, 0, gw, gh); else (src as VideoSample).draw(g2d, 0, 0, gw, gh)
+      if (src instanceof HTMLImageElement || src instanceof HTMLCanvasElement) g2d.drawImage(src, 0, 0, gw, gh); else (src as VideoSample).draw(g2d, 0, 0, gw, gh)
       const px = g2d.getImageData(0, 0, gw, gh)
       applyGradeLut(px.data, bakeGradeLut(grades))
       g2d.putImageData(px, 0, 0)
       src = gcv; sw = gw; sh = gh
     }
     // 运动模糊（同预览 VeditMotionBlurCanvas）：这一格（调色后）先抄进这段的历史·再照 mblurPlan 跟前面几格叠成拖影·只对影片
-    const mbFrames = mblurModeOf(lk.mblur, op.media) === 'frames' // 写了 mode 'dir' 的影片改走方向模糊（下面）
+    const mbFrames = mblurModeOf(lk.mblur, op.media) === 'frames' // 写了 mode 'dir' 的影片改走方向模糊（下面）·合成段只走方向模糊
     if (op.media === 'video' && mblurActive(lk.mblur)) { if (mbFrames) {
       const mb = lk.mblur
       const { w: mw, h: mh } = mblurSize(sw, sh)
@@ -614,6 +656,17 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
         if (otherCv.width !== fw || otherCv.height !== fh) { otherCv.width = fw; otherCv.height = fh }
         backdrop(o2d, fw, fh)
         other = otherCv
+      } else if (op.trans?.otherKind === 'comp') {
+        // 转场另一边是合成段：同样另开一只画（另一边那段自己的 key）
+        const oc = op.trans.otherComp ? env.comps?.[op.trans.otherComp] : undefined
+        const os = oc ? await compFrame(`o:${op.trans.other.clip.id}`, op.trans.otherComp, compOtherTime(op.trans.other.source, oc), used) : null
+        if (os) {
+          if (otherCv.width !== fw || otherCv.height !== fh) { otherCv.width = fw; otherCv.height = fh }
+          backdrop(o2d, fw, fh)
+          const r = containRect(fw, fh, os.width, os.height)
+          o2d.drawImage(os, r.x, r.y, r.w, r.h)
+          other = otherCv
+        }
       } else if (op.trans) {
         const om = env.mediaOf(op.trans.otherMedia)
         const ot = otherTime(op.trans.otherKind, op.trans.other.source, om?.duration ?? Infinity)
@@ -631,7 +684,7 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
       if (gl === undefined) { gl = LaneGl.create(); gls.set(op.laneId, gl) }
       const done = gl?.run(scratch, fw, fh, `${op.clip.id}@${op.source.toFixed(4)}`, op.effects,
         op.trans ? { tr: op.trans.tr, progress: op.trans.progress, live: op.trans.live, other, otherFx: op.trans.other.fx, rel: op.trans.other.rel } : null,
-        op.filter ? { params: op.filter.params, strength: op.filter.strength, seed: op.media === 'video' ? Math.round(op.source * 30) : 0 } : null, t) ?? null
+        op.filter ? { params: op.filter.params, strength: op.filter.strength, seed: op.media !== 'image' ? Math.round(op.source * 30) : 0 } : null, t) ?? null
       src = done ?? scratch; sw = fw; sh = fh
     }
     // 画面属性：位置大小／旋转／不透明度／混合模式＋动画姿势（同预览 lookStyle）·蒙版（同预览 maskSvg·对着素材那块）
@@ -692,6 +745,7 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
       ctx.save()
       ctx.globalAlpha = xf.opacity
       ctx.globalCompositeOperation = mt ? 'source-over' : blendOp(lk.blend)
+      if (rigM) ctx.transform(...rigM) // 父层的变换套在整层最外（同预览外框）
       if (dirS || gp) {
         // 先画成一张整画面大小的图（四角透视、外发光都在这张上做）·再带不透明度／混合／阴影贴上去（同预览：外发光在阴影那层框里面、阴影在最外）
         let full = pinH ? pinLayer(pinH, placed) : (() => { const f = scratchFull(0); const f2 = f.getContext('2d')!; f2.setTransform(1, 0, 0, 1, 0, 0); f2.globalAlpha = 1; f2.clearRect(0, 0, W, H); f2.save(); placed(f2); f2.restore(); return f })()
@@ -709,8 +763,22 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
     }
     if (mt) {
       const imgs = new Map<string, HTMLImageElement | null>()
-      for (const o of mt.ops) if (o.kind === 'sticker') { const it = stickerById(o.body.sticker); if (it) imgs.set(stickerSrc(it), await stickerImg(stickerSrc(it))) }
-      drawMatteOps(mk2d, mt, W, H, t, env.tracks, (f) => imgs.get(f) ?? null)
+      const pic = mt.ops.filter((o) => o.kind === 'media' || o.kind === 'vector')
+      if (pic.length) {
+        // 画面层当遮罩（影片／图片／形状／合成段）：照它平常的画法（外观、关键帧、特效…）画进遮罩画布·再逐像素转成遮罩（matteAlpha·同文字遮罩那支）
+        mk2d.setTransform(1, 0, 0, 1, 0, 0); mk2d.globalAlpha = 1; mk2d.globalCompositeOperation = 'source-over'; mk2d.clearRect(0, 0, W, H)
+        mlCv ??= mkCanvas(W, H)
+        const ml2 = mlCv.getContext('2d', { willReadFrequently: true })!
+        ml2.setTransform(1, 0, 0, 1, 0, 0); ml2.globalAlpha = 1; ml2.globalCompositeOperation = 'source-over'; ml2.clearRect(0, 0, W, H)
+        const keepM = rigM; rigM = null // 遮罩那层不套被遮那段的父层变换
+        try { for (const o of pic) { if (o.kind === 'vector') drawVectorClip(ml2, o.clip, t, W, H); else await drawMedia({ ...o, matte: undefined }, t, used, ml2) } } finally { rigM = keepM }
+        const px = ml2.getImageData(0, 0, W, H)
+        matteAlpha(px.data, mt.mode, mt.invert)
+        mk2d.putImageData(px, 0, 0)
+      } else {
+        for (const o of mt.ops) if (o.kind === 'sticker') { const it = stickerById(o.body.sticker); if (it) imgs.set(stickerSrc(it), await stickerImg(stickerSrc(it))) }
+        drawMatteOps(mk2d, mt, W, H, t, env.tracks, (f) => imgs.get(f) ?? null)
+      }
       mt2d.globalCompositeOperation = 'destination-in'; mt2d.drawImage(mkCv, 0, 0); mt2d.globalCompositeOperation = 'source-over'
       ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = blendOp(lk.blend); ctx.drawImage(mtCv, 0, 0); ctx.restore()
     }
@@ -718,7 +786,7 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
 
   const drawOp = async (op: DrawOp, t: number, used: Set<string>) => {
     if (op.kind === 'media') return drawMedia(op, t, used)
-    if (op.kind === 'vector') { drawVectorClip(ctx, op.clip, t, W, H); return } // 形状／纯色：同预览 VeditVectorCanvas
+    if (op.kind === 'vector') { ctx.save(); if (rigM) ctx.transform(...rigM); drawVectorClip(ctx, op.clip, t, W, H); ctx.restore(); return } // 形状／纯色：同预览 VeditVectorCanvas
     if (op.kind === 'text' || op.kind === 'sticker') {
       // 文字／贴纸画进 c（照原本的位置）；四角透视 ⇒ 先画进 pinCv 再投影（同画面片段·同预览 pinCssMatrix 那个矩阵）
       let im: CanvasImageSource | null = null, it: ReturnType<typeof stickerById> = null
@@ -739,6 +807,7 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
       // 运动跟踪：整层跟着路径平移／缩放（followAt 同预览）·套在四角透视外面
       const fo = followAt(env.tracks, op.clip, t, W / H)
       ctx.save()
+      if (rigM) ctx.transform(...rigM) // 父层的变换在最外（跟随、四角透视之外·同预览）
       if (fo) ctx.transform(...followAffine(fo, W, H))
       if (pinT) ctx.drawImage(pinLayer(pinT, drawTS), 0, 0); else drawTS(ctx)
       ctx.restore()
@@ -753,18 +822,50 @@ export async function frameDrawer(env: ExportEnv, W: number, H: number, o: { alp
     if (bmp) { ctx.drawImage(bmp, 0, 0, W, H); bmp.close() }
   }
 
-  const frame = async (t: number, only?: ReadonlySet<string>) => {
+  /** 父子连结／3D：2D 父链 ⇒ 直接套画布仿射（混合模式照旧）；3D 层或父链带不透明度 ⇒ 先照 2D 画法画进暂存整张·
+   *  再照同一个 homography 逐像素投影（warpPixels）·乘灯光（shadePixels）·带不透明度／景深模糊贴上（同预览 rigCssMatrix＋feColorMatrix＋blur） */
+  const drawRigged = async (op: DrawOp, r: RigOut, t: number, used: Set<string>) => {
+    if (r.hidden) return
+    if (!r.is3d && r.alpha >= 1) { rigM = r.m ? rigCanvasAffine(r.m, W, H) : null; try { await drawOp(op, t, used) } finally { rigM = null } return }
+    rigCv ??= mkCanvas(W, H); rigOutCv ??= mkCanvas(W, H)
+    const r2 = rigCv.getContext('2d', { willReadFrequently: true })! as CanvasRenderingContext2D
+    r2.setTransform(1, 0, 0, 1, 0, 0); r2.globalAlpha = 1; r2.globalCompositeOperation = 'source-over'; r2.filter = 'none'; r2.clearRect(0, 0, W, H)
+    ctx = r2
+    try { rigM = !r.is3d && r.m ? rigCanvasAffine(r.m, W, H) : null; await drawOp(op, t, used) } finally { ctx = main; rigM = null }
+    let src: CanvasImageSource = rigCv
+    if (r.is3d && r.m) {
+      const o2 = rigOutCv.getContext('2d')! as CanvasRenderingContext2D
+      const a = r2.getImageData(0, 0, W, H), b = o2.createImageData(W, H)
+      warpPixels(a.data, b.data, W, H, r.m)
+      if (r.shade) shadePixels(b.data, r.shade)
+      o2.putImageData(b, 0, 0)
+      src = rigOutCv
+    }
+    // 暂存那张是对着透明底画的（混合模式等于没混）⇒ 混合模式在贴回成片时才套（同预览外框的 mix-blend-mode）
+    main.save(); main.setTransform(1, 0, 0, 1, 0, 0); main.globalAlpha = r.alpha; main.globalCompositeOperation = op.kind === 'media' ? blendOp(lookOf(op.clip, t).blend) : 'source-over'
+    if (r.blur > 0) main.filter = `blur(${(r.blur * H).toFixed(2)}px)`
+    main.drawImage(src, 0, 0)
+    main.restore()
+  }
+
+  /** fo.mosaic false ⇒ 不打码（预览那张 PlanCanvas 只画一层·打码由预览自己那层画） */
+  const frame = async (t: number, only?: ReadonlySet<string>, fo: { mosaic?: boolean } = {}) => {
     const used = new Set<string>()
     mbUsed.clear()
+    ctx = main
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'
     backdrop(ctx, W, H)
-    for (const op of framePlan(env.tracks, t, kindOf, only)) await drawOp(op, t, used)
-    drawMosaics(ctx, mosaicsAt(env.tracks, t, only), W, H) // 追踪打码：打在合成好的整格画面上
+    // 父子连结／3D：一帧一个场景（摄影机、灯光、父链）·3D 层照远近排（预览同一份 rigScene）
+    const scene = rigScene(env.tracks, t, W / H)
+    for (const op of scene.order(framePlan(env.tracks, t, kindOf, only, env.comps), (o) => o.clip)) await drawRigged(op, scene.of(op.clip), t, used)
+    if (fo.mosaic !== false) drawMosaics(ctx, mosaicsAt(env.tracks, t, only), W, H) // 追踪打码：打在合成好的整格画面上
     for (const [k, c] of cursors) if (!used.has(k)) { cursors.delete(k); await c.close() }   // 放完的段关掉解码器
+    for (const [k, p] of compFds) if (!used.has(k)) { compFds.delete(k); void p.then((d) => d?.dispose()) } // 放完的合成段关掉
     for (const k of [...mbHist.keys()]) if (!mbUsed.has(k)) mbHist.delete(k) // 放完的段丢掉运动模糊历史
   }
   const dispose = async () => {
     for (const c of cursors.values()) await c.close()
+    for (const p of compFds.values()) await (await p)?.dispose()
     for (const g of gls.values()) g?.dispose()
     for (const h of hosts.values()) h?.dispose()
     for (const i of inputs) i.dispose()
@@ -808,8 +909,9 @@ export const fmtDur = (s: number) => { const t = Math.max(0, Math.round(s)); ret
 /** 汇出音频：range 那段的混音（同成片的声音）编成 WAV；没声音 ⇒ null */
 export async function renderAudio(env: ExportEnv, range: ExportRange, signal?: AbortSignal): Promise<Blob | null> {
   const kindOf = (id: string) => env.mediaOf(id)?.kind
-  const ids = range.only ? [...range.only] : env.tracks.flatMap((l) => l.clips.map((c) => c.id))
-  const plan = subClipPlan(env.tracks, ids, kindOf)
+  const aTracks = flattenCompAudio(env.tracks, env.comps)
+  const ids = range.only ? withCompAudioIds([...range.only], aTracks) : aTracks.flatMap((l) => l.clips.map((c) => c.id))
+  const plan = subClipPlan(aTracks, ids, kindOf)
   if (!plan || !plan.segs.length) return null
   const buffer = await mixForExport(env, plan, range.from, range.to - range.from, signal)
   const chs = Array.from({ length: buffer.numberOfChannels }, (_, i) => buffer.getChannelData(i))

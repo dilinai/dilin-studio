@@ -58,11 +58,11 @@ const newId = () => `cli${Date.now().toString(36)}${(++seq).toString(36)}`
 export function cliRun(doc: VideoDoc, steps: CommandStep[]): { ok: true; doc: VideoDoc; results: unknown[] } | { ok: false; error: string } {
   const web = steps.findIndex((s) => s && WEBSITE_ONLY.has(String(s.command).trim()))
   if (web >= 0) return { ok: false, error: `Step ${web} (${steps[web].command}) needs the website (voice-overs, web screenshots and sound effects). Nothing was applied.` }
-  const r = applyCommandsState({ tracks: doc.tracks, ratio: doc.ratio, media: doc.media.map((m) => ({ ...m, from: 'local' as const })) }, steps, { newId })
+  const r = applyCommandsState({ tracks: doc.tracks, ratio: doc.ratio, media: doc.media.map((m) => ({ ...m, from: 'local' as const })), programs: doc.programs, ...(doc.comps ? { comps: doc.comps } : {}) }, steps, { newId })
   if (!r.ok) return { ok: false, error: `${r.step >= 0 ? `Step ${r.step}${r.command ? ` (${r.command})` : ''} failed: ` : ''}${r.error}\nNothing was applied (all steps apply together or not at all).` }
   if (JSON.stringify(r.state.media.map((m) => m.id)) !== JSON.stringify(doc.media.map((m) => m.id))) return { ok: false, error: 'Adding or removing media files is not available from the command line: copy the file into assets/ and add it to "media" in project.json. Nothing was applied.' }
   // 再过一次读档检查（同编辑页入账前那道）：命令做出编辑页读不进的东西 ⇒ 当错
-  const next = docFromJson(JSON.parse(cliSave({ ...doc, tracks: r.state.tracks, ratio: r.state.ratio })))
+  const next = docFromJson(JSON.parse(cliSave({ ...doc, tracks: r.state.tracks, ratio: r.state.ratio, comps: r.state.comps, programs: { ...(r.state.programs ?? doc.programs) } }))) // 子合成（comp.* 命令）一起写回
   return { ok: true, doc: next, results: r.results }
 }
 

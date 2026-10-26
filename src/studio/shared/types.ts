@@ -232,6 +232,11 @@ export interface StudioApp<Doc = unknown> {
    */
   saveForOtherApps?: { label: string; hint?: string; build(store: ProjectStore): Promise<{ name: string; text: string | Blob }[]> }
   /**
+   * 开源单机版命令列（tools/<编辑器>-cli.mjs）要浏览器 DOM 的汇出：命令列开的无头页经本机小服务交来 {kind:'export', format}（shared/cli-page-job.ts）。
+   * 读 store 里的工程（外框先 flush）⇒ 档；format 不认得 ⇒ 丢错。没给 ⇒ 这个编辑器没有这种汇出。
+   */
+  cliExport?(store: ProjectStore, format: string, t: StudioT): Promise<{ files: { name: string; blob: Blob }[]; notes?: string[] }>
+  /**
    * 照登入版整页搬来的那一份（见 page-host.ts）。有给 ⇒ 游客工程页整页渲染它（不套 StudioShell 外框）；
    * 没给 ⇒ 照旧 StudioShell＋Editor。
    */

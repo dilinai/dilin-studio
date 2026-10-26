@@ -20,11 +20,12 @@ export function freezeBox(geo: Geo | null, fr: number, fc: number): FreezeBox {
 }
 
 /** 冻结格的 sticky 样式（不在冻结区 ⇒ null）·kind：cell＝资料格／rowHead＝行号／colHead＝列头 */
-export function frozenStyle(kind: 'cell' | 'rowHead' | 'colHead', r: number, c: number, fr: number, fc: number, geo: Geo | null, zoom: number, sizes: { headW: number; headH: number; colWidths?: Record<string, number>; rowHeights?: Record<string, number> }): CSSProperties | null {
+export function frozenStyle(kind: 'cell' | 'rowHead' | 'colHead', r: number, c: number, fr: number, fc: number, geo: Geo | null, zoom: number, sizes: { headW: number; headH: number; colWidths?: Record<string, number>; rowHeights?: Record<string, number>; hiddenRows?: ReadonlySet<number>; hiddenCols?: ReadonlySet<number> }): CSSProperties | null {
   const inR = kind !== 'colHead' && r < fr, inC = kind !== 'rowHead' && c < fc
   if (!inR && !inC) return null
-  const top = () => { if (geo?.rowT[r] !== undefined) return geo.rowT[r] / zoom; let y = sizes.headH; for (let i = 0; i < r; i++) y += rowHeightOf(sizes.rowHeights, i); return y }
-  const left = () => { if (geo?.colL[c] !== undefined) return geo.colL[c] / zoom; let x = sizes.headW; for (let i = 0; i < c; i++) x += colWidthOf(sizes.colWidths, i); return x }
+  // 还没量到几何（第一拍）⇒ 照行高栏宽累加·藏的行／栏算 0
+  const top = () => { if (geo?.rowT[r] !== undefined) return geo.rowT[r] / zoom; let y = sizes.headH; for (let i = 0; i < r; i++) if (!sizes.hiddenRows?.has(i)) y += rowHeightOf(sizes.rowHeights, i); return y }
+  const left = () => { if (geo?.colL[c] !== undefined) return geo.colL[c] / zoom; let x = sizes.headW; for (let i = 0; i < c; i++) if (!sizes.hiddenCols?.has(i)) x += colWidthOf(sizes.colWidths, i); return x }
   // 格线：border-collapse 下 sticky 格的框线留在原位不跟着走（钉住后边上一条缝会透出底下卷过去的字）⇒ 用外扩 1px 同色阴影补线盖缝；
   //   冻结区最后一行下缘／最后一列右缘另加一条深灰分隔线（Excel 冻结线）
   const line = ['0 0 0 1px #e5e7eb', inR && r === fr - 1 ? '0 1.5px 0 0 #9ca3af' : '', inC && c === fc - 1 ? '1.5px 0 0 0 #9ca3af' : ''].filter(Boolean).join(', ')
@@ -53,27 +54,26 @@ export function FrozenOverlayPanes({ box, width, height, render }: { box: Freeze
 /**
  * 量出的几何修正（SheetGrid measure 量完调一次·就地改）：
  *   冻结的行号／列头是 sticky——卷动后量到的是钉住的位置 ⇒ 用第一条没冻结（量得准）的那条往回推（各条高宽不受 sticky 影响）；
- *   被筛掉的行（display:none）量出来全是 0 ⇒ 当零高、贴在上一行下缘。没冻结也没筛 ⇒ 一个数都不动。
+ *   被筛掉／手动藏的行、手动藏的栏（display:none）量出来全是 0 ⇒ 当零高零宽、贴在上一条后缘。没冻结也没藏 ⇒ 一个数都不动。
  */
 export function fixFrozenGeo(tb: HTMLElement, g: Geo, fz: { fr: number; fc: number }): void {
-  const rr = Array.from(tb.querySelectorAll<HTMLElement>('th[data-row]')).map(th => th.getBoundingClientRect())
-  const hidden = rr.map(r => !(r.width > 0 || r.height > 0))
-  let fixedTo = 0
-  if (fz.fr > 0) {
-    let j = fz.fr
-    while (j < rr.length && hidden[j]) j++
-    if (j < rr.length) {
-      let y = g.rowT[j]
-      for (let i = j - 1; i >= 0; i--) { const h = hidden[i] ? 0 : rr[i].height; g.rowB[i] = y; g.rowT[i] = y - h; y = g.rowT[i] }
-      fixedTo = j
+  // 行（被筛掉／手动藏的行）与栏（手动藏的栏：列头 th display:none）同一套：冻结的往回推·藏的当零宽贴在前一条后缘（打头就藏 ⇒ 贴在第一条看得见的前缘）
+  const fix = (sel: string, L: number[], R: number[], frozen: number, size: (r: DOMRect) => number) => {
+    const rr = Array.from(tb.querySelectorAll<HTMLElement>(sel)).map(th => th.getBoundingClientRect())
+    const hidden = rr.map(r => !(r.width > 0 || r.height > 0))
+    let fixedTo = 0
+    if (frozen > 0) {
+      let j = frozen
+      while (j < rr.length && hidden[j]) j++
+      if (j < rr.length) {
+        let y = L[j]
+        for (let i = j - 1; i >= 0; i--) { const h = hidden[i] ? 0 : size(rr[i]); R[i] = y; L[i] = y - h; y = L[i] }
+        fixedTo = j
+      }
     }
+    const first = hidden.indexOf(false)
+    for (let i = fixedTo; i < rr.length; i++) if (hidden[i]) { const y = i > 0 && i > first ? R[i - 1] : first >= 0 ? L[first] : L[i]; L[i] = y; R[i] = y }
   }
-  for (let i = fixedTo; i < rr.length; i++) if (hidden[i]) { const y = i > 0 ? g.rowB[i - 1] : g.rowT[i]; g.rowT[i] = y; g.rowB[i] = y }
-  if (fz.fc > 0) {
-    const cr = Array.from(tb.querySelectorAll<HTMLElement>('th[data-col]')).map(th => th.getBoundingClientRect())
-    if (fz.fc < cr.length) {
-      let x = g.colL[fz.fc]
-      for (let i = fz.fc - 1; i >= 0; i--) { g.colR[i] = x; g.colL[i] = x - cr[i].width; x = g.colL[i] }
-    }
-  }
+  fix('th[data-row]', g.rowT, g.rowB, fz.fr, r => r.height)
+  fix('th[data-col]', g.colL, g.colR, fz.fc, r => r.width)
 }

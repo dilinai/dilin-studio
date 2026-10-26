@@ -28,6 +28,7 @@ import { chartDrawingParts, chartContentTypes } from './chart-xlsx'   // 图表�
 import { condFormatSheetXml, parseDxfs, parseCondFormatting } from './cond-format-xlsx'   // 条件格式
 import type { CondStyle } from './cond-format'
 import { sheetViewXmlParts, filterDefinedNamesXml, readSheetViewXml, viewImportWarnings } from './sheet-view-xlsx' // 冻结筛选验证
+import { filteredRows, type ViewContent } from './sheet-view'   // 手动隐藏的行扣掉筛选藏的
 import { printXmlParts, printDefinedNames, mergeDefinedNames, readPrintDefinedNames, readPrintXml } from './print-xlsx' // 列印设定
 
 export type WorkbookSheet = { name: string; content: AgentContent }
@@ -321,7 +322,11 @@ function sheetXml(content: AgentContent, styles: StyleTable, extra: SheetExtra =
   for (const m of merges) { const r = parseRange(m)!; minR = Math.min(minR, r.r0); minC = Math.min(minC, r.c0); maxR = Math.max(maxR, r.r1); maxC = Math.max(maxC, r.c1) }
   const dim = maxR >= 0 ? (minR === maxR && minC === maxC ? cellKey(minR, minC) : `${cellKey(minR, minC)}:${cellKey(maxR, maxC)}`) : 'A1'
   const colW = content.colWidths && typeof content.colWidths === 'object' ? Object.entries(content.colWidths).filter(([k, w]) => /^[A-Z]{1,3}$/.test(k) && typeof w === 'number' && w > 0).map(([k, w]) => ({ c: colToIndex(k), w: w as number })).sort((a, b) => a.c - b.c) : []
-  const cols = colW.length ? `<cols>${colW.map(({ c, w }) => `<col min="${c + 1}" max="${c + 1}" width="${pxToColWidth(w)}" customWidth="1"/>`).join('')}</cols>` : ''
+  // 手动隐藏的栏：没设宽的也要写一条 <col hidden="1">（宽照预设）
+  const hidCols = new Set((content as { hiddenCols?: number[] }).hiddenCols ?? [])
+  for (const c of hidCols) if (!colW.some(x => x.c === c)) colW.push({ c, w: 0 })
+  colW.sort((a, b) => a.c - b.c)
+  const cols = colW.length ? `<cols>${colW.map(({ c, w }) => `<col min="${c + 1}" max="${c + 1}" width="${pxToColWidth(w > 0 ? w : COL_W_DEFAULT)}"${w > 0 ? ' customWidth="1"' : ''}${hidCols.has(c) ? ' hidden="1"' : ''}/>`).join('')}</cols>` : ''
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
     // 缺 <sheetViews> 时 Excel 读进来的行高一律减半（明写 ht=21 也读成 10.5）·补一行即正常（同 openpyxl）·顺序 dimension→sheetViews→sheetFormatPr→cols
     // 默认列宽／行高＝编辑器 96px／28px（没设宽高的列与行在 Excel 里同尺寸·上下层图与合成背景才对得上位）·顺序 dimension→sheetFormatPr→cols
@@ -985,8 +990,10 @@ export function parseXlsx(buf: Uint8Array, opts: { formulas?: 'keep' | 'values' 
     const cols = (ws['!cols'] ?? []) as Array<{ width?: number; wpx?: number; hidden?: boolean } | undefined>
     const colWidths: Record<string, number> = {}
     cols.forEach((col, i) => { if (!col || i > MAX_COL_INDEX) return; const px = typeof col.width === 'number' ? colWidthToPx(col.width) : col.wpx; if (typeof px === 'number' && px > 0) colWidths[indexToCol(i)] = px })
+    const hidCols = cols.map((col, i) => (col?.hidden && i <= MAX_COL_INDEX ? i : -1)).filter(i => i >= 0)
+    if (hidCols.length) content.hiddenCols = hidCols
     if (Object.keys(colWidths).length) content.colWidths = colWidths
-    const rows = (ws['!rows'] ?? []) as Array<{ hpt?: number; hpx?: number } | undefined>
+    const rows = (ws['!rows'] ?? []) as Array<{ hpt?: number; hpx?: number; hidden?: boolean } | undefined>
     const rowHeights: Record<string, number> = {}
     rows.forEach((row, i) => { if (!row || i > MAX_ROW_INDEX) return; const px = typeof row.hpt === 'number' ? Math.round(row.hpt * 4 / 3) : row.hpx; if (typeof px === 'number' && px > 0) rowHeights[String(i + 1)] = px })
     if (Object.keys(rowHeights).length) content.rowHeights = rowHeights
@@ -1001,6 +1008,12 @@ export function parseXlsx(buf: Uint8Array, opts: { formulas?: 'keep' | 'values' 
     }
     // 冻结筛选验证：冻结 pane／autoFilter／list 型资料验证读回来（工作表 XML 里那三段）
     if (parts[si]?.xml) { try { const v = readSheetViewXml(parts[si].xml); Object.assign(content, v.view); warnings.push(...viewImportWarnings(name, v.skipped)) } catch { /* 读不懂就略过·值照收 */ } }
+    // 手动隐藏的行：xlsx 里 hidden 的行扣掉被筛选藏的（那些清了筛选要放出来）
+    {
+      const filtered = filteredRows(content as ViewContent)
+      const hidRows = rows.map((row, i) => (row?.hidden && i <= MAX_ROW_INDEX && !filtered.has(i) ? i : -1)).filter(i => i >= 0)
+      if (hidRows.length) content.hiddenRows = hidRows
+    }
     // 列印设定：纸张方向缩放边界列印选项页首页尾＋列印范围标题
     if (parts[si]?.xml) { try { const pr = readPrintXml(parts[si].xml, printNames.get(si)); if (pr) content.print = pr } catch { /* 读不懂就略过 */ } }
     sheets.push({ name, content })

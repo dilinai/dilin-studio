@@ -267,8 +267,14 @@ body.dl-humanlock #rightpanel, body.dl-humanlock #optionbar { opacity: .75; }
 #rpGrip.on{background:rgba(14,165,233,.6)}
 body.rp-resizing, body.rp-resizing *{cursor:col-resize !important; user-select:none !important}
 body.tb-full #rpGrip, body.tb-present #rpGrip{display:none}
-.rpfold{margin-left:auto; align-self:center; background:transparent; border:0; color:var(--fg2); font-size:12px; line-height:1; padding:2px 6px; cursor:pointer; border-radius:3px}
-.rpfold:hover{color:#fff; background:var(--bg3)}
-#rightpanel.rp-collapsed > .rppane{display:none !important}
+.rpfold{margin-left:auto; align-self:center; background:var(--bg3); border:1px solid var(--line); color:#fff; font-size:17px; font-weight:700; line-height:1; min-width:24px; min-height:24px; padding:3px 6px; cursor:pointer; border-radius:4px}
+.rpfold:hover{background:#0ea5e9; border-color:#0ea5e9}
+/* 整条收成贴右缘窄条（腾出空间给画布）：盖掉拖拉存的行内宽·只留展开箭头 */
+#rightpanel.rp-collapsed{width:28px !important; flex:0 0 28px !important; padding:6px 0; align-items:center; cursor:pointer}
+#rightpanel.rp-collapsed > :not(.rptabs){display:none !important}
+#rightpanel.rp-collapsed .rptabs{border-bottom:0}
+#rightpanel.rp-collapsed .rptab{display:none}
+#rightpanel.rp-collapsed .rpfold{margin:0}
+#rpGrip.rp-hide{display:none}
 #optBody{flex:1 1 auto; min-width:0}
 #optBody > span[style*="122, 130, 144"], #optBody > span[style*="7a8290"]{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1 1 auto}

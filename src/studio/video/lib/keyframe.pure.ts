@@ -90,7 +90,9 @@ export const KF_MASK_KEYS = ['x', 'y', 'w', 'h', 'rot', 'feather', 'radius', 'pr
 export const KF_ADJ_KEYS = ['temp', 'tint', 'sat', 'vib', 'bright', 'contrast', 'highlight', 'shadow', 'white', 'black', 'light', 'sharpen', 'clarity', 'grain', 'fade', 'vignette'] as const
 /** 四角透视（corner-pin.pure PIN_KEYS 同一串·这里不 import 免绕圈） */
 export const KF_PIN_KEYS = ['x0', 'y0', 'x1', 'y1', 'x2', 'y2', 'x3', 'y3'] as const
-export const KF_PROPS = ['sx', 'sy', 'x', 'y', 'rot', 'opacity', ...KF_MASK_KEYS.map((k) => `mask.${k}` as const), ...KF_ADJ_KEYS.map((k) => `adj.${k}` as const), 'vol', 'flt', 'tx', 'ty', 'ts', 'trot', 'top', ...KF_PIN_KEYS.map((k) => `pin.${k}` as const)] as const
+/** 3D 层（d3.z／rx／ry／rz）·摄影机（cam.*）·灯光（lt.*）——见 rig.pure.ts（这里不 import 免绕圈·同一串） */
+export const KF_RIG_PROPS = ['d3.z', 'd3.rx', 'd3.ry', 'd3.rz', 'cam.x', 'cam.y', 'cam.z', 'cam.tx', 'cam.ty', 'cam.tz', 'cam.fov', 'lt.int', 'lt.x', 'lt.y', 'lt.z'] as const
+export const KF_PROPS = ['sx', 'sy', 'x', 'y', 'rot', 'opacity', ...KF_MASK_KEYS.map((k) => `mask.${k}` as const), ...KF_ADJ_KEYS.map((k) => `adj.${k}` as const), 'vol', 'flt', 'tx', 'ty', 'ts', 'trot', 'top', ...KF_PIN_KEYS.map((k) => `pin.${k}` as const), ...KF_RIG_PROPS] as const
 export type KfProp = (typeof KF_PROPS)[number]
 export type KfTracks = Partial<Record<KfProp, Kf[]>>
 /** 两颗关键帧当成同一颗的距离（半帧·30fps） */

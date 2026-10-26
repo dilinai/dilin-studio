@@ -817,7 +817,7 @@ function psdMaskOf(L){
    文字层（没修饰、没变形）⇒ 能改的文字；矢量层（纯色填色／描边一致、没编组剪切）⇒ 形状图层；
    图层样式只有 PS 也有的那几种（投影、内阴影、外发光、内发光、描边、颜色叠加，每种一个）⇒ 写成样式；
    有别的样式 ⇒ 这层连样式照画面画成像素（不再另写样式，免得叠两次）。 */
-const PSD_FX = ['dropShadow', 'innerShadow', 'outerGlow', 'innerGlow', 'stroke', 'colorOverlay'];
+const PSD_FX = ['dropShadow', 'innerShadow', 'outerGlow', 'innerGlow', 'stroke', 'colorOverlay', 'gradientOverlay', 'satin', 'patternOverlay', 'bevelEmboss'];
 const psdRgbCtx = () => psdRgbCtx.c || (psdRgbCtx.c = ctx2d(mkCanvas(1, 1)));
 function psdRgb(c){
   if (Array.isArray(c)) return c.slice(0, 3);
@@ -826,16 +826,139 @@ function psdRgb(c){
   const m = s.match(/[\d.]+/g) || [0, 0, 0]; return [+m[0], +m[1], +m[2]];
 }
 const psdAlpha = c => { const x = psdRgbCtx(); x.fillStyle = '#000'; x.fillStyle = String(c || '#000'); const m = x.fillStyle.match(/rgba\([^)]*,\s*([\d.]+)\)/); return m ? +m[1] : 1; };
-function psdFxOf(L){
-  if (!(window.PsLayerStyle && PsLayerStyle.has(L))) return null;
+function psdFxOf(L, bakePat){
+  // 只看图层自己的样式（PsLayerStyle.has 还把调整层、剪贴组、矢量蒙版算进去，那些另外写）
+  if (!(L && L.style && L.style.enabled !== false && Array.isArray(L.style.items))) return null;
   const items = L.style.items.filter(e => e.enabled !== false);
+  if (!items.length) return null;
   const seen = new Set();
   for (const e of items){ if (!PSD_FX.includes(e.kind) || seen.has(e.kind)) return 'bake'; seen.add(e.kind); }
+  // 保底（psdPatterns:'bake'）：图案叠加、斜面浮雕纹理连同那层画成像素，文件里就没有 Patt
+  if (bakePat && items.some(e => e.kind === 'patternOverlay' || (e.kind === 'bevelEmboss' && e.texture))) return 'bake';
   const gl = Doc.globalLight && typeof Doc.globalLight.angle === 'number' ? Doc.globalLight.angle : 120;
-  // 引擎存 0..1（不透明度、扩展／收缩都在 spread、范围）⇒ PSD 用百分比
+  const ga = Doc.globalLight && typeof Doc.globalLight.altitude === 'number' ? Doc.globalLight.altitude : 30;
+  // 引擎存 0..1（不透明度、扩展／收缩都在 spread、范围、缩放、深度）⇒ PSD 用百分比
   const pc = v => (typeof v === 'number' ? v * 100 : undefined);
-  return items.map(e => ({kind:e.kind, enabled:true, blend:e.blend, color:psdRgb(e.color), opacity:pc(e.opacity), angle:e.useGlobalLight ? gl : e.angle,
-    distance:e.distance, spread:pc(e.spread), choke:pc(e.spread), size:e.size, range:pc(e.range), technique:e.technique, source:e.source, position:e.position, knocksOut:e.knocksOut}));
+  const grad = g => ({from:psdRgb(g.from), to:psdRgb(g.to), style:g.style, angle:g.angle, scale:pc(g.scale), reverse:!!g.reverse});
+  const pat = id => { const P = window.PsEdit && PsEdit.patterns && PsEdit.patterns.resolve(id || ''); return P && P.px ? {id:P.id, name:P.name, width:P.width, height:P.height, px:P.px} : null; };
+  const out = [];
+  for (const e of items){
+    const o = {kind:e.kind, enabled:true, blend:e.blend, opacity:pc(e.opacity)};
+    if (e.kind === 'gradientOverlay') Object.assign(o, grad(e));
+    else if (e.kind === 'satin') Object.assign(o, {color:psdRgb(e.color), angle:e.angle, distance:e.distance, size:e.size, invert:e.invert !== false});
+    else if (e.kind === 'patternOverlay'){ const P = pat(e.pattern) || pat(e.name); if (!P) return 'bake'; Object.assign(o, {pattern:P, scale:pc(e.scale), angle:e.angle || 0, link:e.link !== false, phase:e.phase || [0, 0]}); }
+    else if (e.kind === 'bevelEmboss'){
+      Object.assign(o, {style:e.style, technique:e.technique, depth:pc(e.depth), up:e.up !== false, size:e.size, soften:e.soften, angle:e.useGlobalLight ? gl : e.angle, altitude:e.useGlobalLight ? ga : e.altitude,
+        highlightColor:psdRgb(e.highlightColor), highlightBlend:e.highlightBlend, highlightOpacity:pc(e.highlightOpacity), shadowColor:psdRgb(e.shadowColor), shadowBlend:e.shadowBlend, shadowOpacity:pc(e.shadowOpacity),
+        contour:e.contour ? {range:e.contour.range} : null});
+      if (e.texture){ const P = pat(e.texture.pattern); if (!P) return 'bake'; o.texture = {pattern:P, scale:e.texture.scale, depth:e.texture.depth, invert:!!e.texture.invert, link:e.texture.link !== false}; }
+    }
+    else Object.assign(o, {color:psdRgb(e.color), angle:e.useGlobalLight ? gl : e.angle, distance:e.distance, spread:pc(e.spread), choke:pc(e.spread), size:e.size, range:pc(e.range),
+      technique:e.technique, source:e.source, position:e.position, knocksOut:e.knocksOut}, e.kind === 'stroke' && e.gradient ? {gradient:grad(e.gradient)} : {});
+    out.push(o);
+  }
+  return out;
+}
+/* 调整图层 ⇒ {kind, params, cube?}（颜色查找另带 .cube 文字：PS 的颜色查找层存的是 LUT 档本身） */
+function psdAdjOf(L){
+  const A = L.adjust; if (!A || !window.PsdIO || !PsdIO.ADJ_KEY[A.kind]) return null;
+  const params = JSON.parse(JSON.stringify(A.params || {})), out = {kind:A.kind, params};
+  if (A.kind === 'colorLookup' && window.PsImage) try {
+    const a = PsImage.fromParams('colorLookup', params, null);
+    if (a && a.lut && a.size >= 2){
+      const n = a.size, lines = ['TITLE "' + String(a.name || 'Look').replace(/"/g, '') + '"', 'LUT_3D_SIZE ' + n];
+      for (let i = 0; i < n * n * n; i++) lines.push(`${a.lut[i * 3].toFixed(6)} ${a.lut[i * 3 + 1].toFixed(6)} ${a.lut[i * 3 + 2].toFixed(6)}`);   // 红最快（.cube 的顺序）
+      const t = lines.join('\n') + '\n', u = new Uint8Array(t.length); for (let i = 0; i < t.length; i++) u[i] = t.charCodeAt(i) & 255;
+      const base = typeof params.lut === 'string' && params.lut ? params.lut : String(params.fileName || a.name || 'look').replace(/\.cube$/i, '');
+      out.cube = {name:base + '.cube', data:u};
+    }
+  } catch (e){ console.warn('psd color lookup', e); }
+  return out;
+}
+/* 智能对象 ⇒ {id, w, h, corners}（内嵌档推进 ctx.linked）；载不到来源、有智能滤镜或变形／透视（PS 的智能对象写不出我们的这些）⇒ null＝照画面写成像素 */
+function psdSmartOf(L, ctx){
+  if (!ctx || !window.Smart || !Smart.is(L)) return null;
+  const e = Smart.sourceOf(L), d = L.data || {};
+  if (!e || !Smart.available(e) || d.stackMode) return null;
+  if (d.filtersEnabled !== false && (d.filters || []).some(f => f && f.visible !== false)) return null;
+  const t0 = d.transform || [1, 0, 0, 1, 0, 0];
+  let t = [t0[0], t0[1], t0[2], t0[3], t0[4] + (L.x || 0), t0[5] + (L.y || 0)];   // 来源像素 → 文件坐标
+  for (const op of d.ops || []){
+    if (op.type !== 'affine') return null;
+    // 自由变换（文件坐标、记下当时的位移；层后来移了就跟着平移）：同 Smart.applyOp 的式子，套在 t 外面
+    const M = op.m, at = op.at || [0, 0], dx = (L.x || 0) - at[0], dy = (L.y || 0) - at[1];
+    const m = [M[0], M[1], M[2], M[3], M[4] + dx - (M[0] * dx + M[2] * dy), M[5] + dy - (M[1] * dx + M[3] * dy)];
+    t = [m[0] * t[0] + m[2] * t[1], m[1] * t[0] + m[3] * t[1], m[0] * t[2] + m[2] * t[3], m[1] * t[2] + m[3] * t[3], m[0] * t[4] + m[2] * t[5] + m[4], m[1] * t[4] + m[3] * t[5] + m[5]];
+  }
+  if (!ctx.ids) ctx.ids = new Map();
+  let f = ctx.ids.get(e.id);
+  if (!f){
+    let data = null, type = 'png ', name = String(e.name || 'image');
+    if (e.type === 'image'){
+      const u = e.image.toDataURL('image/png'), b = atob(u.slice(u.indexOf(',') + 1)); data = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) data[i] = b.charCodeAt(i);
+      if (!/\.png$/i.test(name)) name = name.replace(/\.[a-z0-9]+$/i, '') + '.png';
+    } else {                                                             // 内嵌文件（分层）⇒ 内嵌一份 PSD（里面照样分层、可再有智能对象）
+      data = Smart.withSubDoc(e, () => psdEncodeDoc(true, {nested:true, patterns:ctx.bakePatterns ? 'bake' : undefined})); type = '8BPS'; name = name.replace(/\.[a-z0-9]+$/i, '') + '.psd';
+    }
+    const id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx'.replace(/x/g, () => (Math.random() * 16 | 0).toString(16));
+    f = {id, name, type, data, w:e.w, h:e.h}; ctx.ids.set(e.id, f); (ctx.linked = ctx.linked || []).push(f);
+  }
+  const P = (x, y) => [t[0] * x + t[2] * y + t[4], t[1] * x + t[3] * y + t[5]];
+  return {id:f.id, w:f.w, h:f.h, corners:[...P(0, 0), ...P(f.w, 0), ...P(f.w, f.h), ...P(0, f.h)]};
+}
+/* 像素层（文字层…）的矢量蒙版 ⇒ {paths:[{closed, knots}]（文件坐标）, inverted, enabled, linked}；画不成贝兹的形状 ⇒ null */
+function psdVmaskOf(L){
+  const vm = L.vmask; if (!vm || !window.VecSel) return null;
+  const off = vm.linked !== false ? [(L.x || 0) - (vm.ax || 0), (L.y || 0) - (vm.ay || 0)] : [0, 0], paths = [];
+  const leaf = s => {
+    if (s.type === 'group' || s.type === 'compound'){ for (const c of s.children || []) if (!leaf(c)) return false; return true; }
+    const g = VecSel.asBezier(s); if (!g || !g.anchors || g.anchors.length < 2) return false;
+    paths.push(psdKnots(g, off)); return true;
+  };
+  for (const s of (vm.shapes || []).filter(s => s && s.visible !== false)) if (!leaf(s)) return null;
+  return {paths, evenOdd:false, inverted:!!vm.inverted, enabled:vm.enabled !== false, linked:vm.linked !== false};
+}
+/* 贝兹（VecSel.asBezier 那份）⇒ PSD 路径的锚点（前控制点、锚点、后控制点；加位移） */
+function psdKnots(g, off){
+  const segs = VecSel.segments(g), n = g.anchors.length, P = p => [p[0] + off[0], p[1] + off[1]];
+  return {closed:!!g.closed, knots:g.anchors.map((a, k) => {
+    const A = [a.x, a.y], post = segs[k] ? segs[k].c1 : A, pre = g.closed ? segs[(k - 1 + n) % n].c2 : (k > 0 && segs[k - 1] ? segs[k - 1].c2 : A);
+    return {pre:P(pre), a:P(A), post:P(post)};
+  })};
+}
+/* 文件的工作路径（Doc.workPath）⇒ PSD 存储路径 */
+function psdPathsOf(){
+  const wp = Doc.workPath; if (!wp || !Array.isArray(wp.subpaths) || !wp.subpaths.length || !window.VecSel) return [];
+  const paths = [];
+  for (const sp of wp.subpaths){ if (!sp || !Array.isArray(sp.anchors) || sp.anchors.length < 2) continue; const g = VecSel.asBezier({type:'bezier', closed:!!sp.closed, anchors:sp.anchors}); if (g && g.anchors && g.anchors.length >= 2) paths.push(psdKnots(g, [0, 0])); }
+  // 资源名是 Pascal 字串（PS 照系统码页读，没有 Unicode 版）⇒ 只写 ASCII，免得中文 Windows 上成乱码
+  return paths.length ? [{name:'Work Path', evenOdd:false, paths}] : [];
+}
+/* 档内配置文件（Doc.iccProfile＝内建 id）⇒ ICC v4 位元组（矩阵＋TRC 的 RGB 显示器配置文件：desc、cprt、wtpt、r/g/bXYZ、r/g/bTRC·para）；
+   灰度／Lab／CMYK 的配置文件不进 RGB 的 PSD ⇒ null */
+function psdIccOf(){
+  const id = Doc.iccProfile; if (!id || !window.PsEdit || !PsEdit.color || !PsEdit.color.builtin) return null;
+  let P; try { P = PsEdit.color.builtin(id); } catch (e){ return null; }
+  if (!P || P.space !== 'rgb' || !Array.isArray(P.matrix) || !Array.isArray(P.trc)) return null;
+  const s15 = v => { const x = Math.round(v * 65536); return x < 0 ? x + 0x100000000 : x; };
+  const be = (n, v) => { const a = []; for (let i = n - 1; i >= 0; i--) a.push(Math.floor(v / Math.pow(256, i)) & 255); return a; };
+  const asc = s => Array.from(s).map(c => c.charCodeAt(0) & 255);
+  const mluc = s => { const u = []; for (const c of String(s)) u.push(c.charCodeAt(0) >> 8, c.charCodeAt(0) & 255); return [...asc('mluc'), 0, 0, 0, 0, ...be(4, 1), ...be(4, 12), ...asc('enUS'), ...be(4, u.length), ...be(4, 28), ...u]; };
+  const xyz = v => [...asc('XYZ '), 0, 0, 0, 0, ...v.flatMap(x => be(4, s15(x)))];
+  const para = c => {
+    if (c.t === 'para'){ const n = c.kind === 0 ? 1 : c.kind === 1 ? 3 : c.kind === 2 ? 4 : c.kind === 3 ? 5 : 7; return [...asc('para'), 0, 0, 0, 0, ...be(2, c.kind), 0, 0, ...c.p.slice(0, n).flatMap(x => be(4, s15(x)))]; }
+    return [...asc('para'), 0, 0, 0, 0, 0, 0, 0, 0, ...be(4, s15(c.t === 'gamma' ? c.g : 1))];
+  };
+  const M = P.matrix, col = j => [M[0][j], M[1][j], M[2][j]];
+  const tags = [['desc', mluc(P.description)], ['cprt', mluc('No copyright, use freely')], ['wtpt', xyz(P.white || [0.9642, 1, 0.8249])],
+    ['rXYZ', xyz(col(0))], ['gXYZ', xyz(col(1))], ['bXYZ', xyz(col(2))], ['rTRC', para(P.trc[0])], ['gTRC', para(P.trc[1])], ['bTRC', para(P.trc[2])]];
+  let off = 128 + 4 + tags.length * 12; const table = [], body = [];
+  for (const [sig, d] of tags){ table.push(...asc(sig), ...be(4, off), ...be(4, d.length)); const pd = (4 - d.length % 4) % 4; body.push(...d, ...new Array(pd).fill(0)); off += d.length + pd; }
+  const size = off, now = new Date();
+  const hdr = [...be(4, size), 0, 0, 0, 0, 0x04, 0x30, 0, 0, ...asc('mntrRGB XYZ '), ...[now.getUTCFullYear(), now.getUTCMonth() + 1, now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds()].flatMap(v => be(2, v)),
+    ...asc('acsp'), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...[0.9642, 1, 0.8249].flatMap(x => be(4, s15(x))), 0, 0, 0, 0];
+  while (hdr.length < 128) hdr.push(0);
+  return new Uint8Array([...hdr, ...be(4, tags.length), ...table, ...body]);
 }
 const PSD_FONTS = {'arial':['ArialMT', 'Arial-BoldMT'], 'helvetica':['Helvetica', 'Helvetica-Bold'], 'times new roman':['TimesNewRomanPSMT', 'TimesNewRomanPS-BoldMT'],
   'courier new':['CourierNewPSMT', 'CourierNewPS-BoldMT'], 'georgia':['Georgia', 'Georgia-Bold'], 'verdana':['Verdana', 'Verdana-Bold'],
@@ -931,25 +1054,34 @@ function psdBaked(L){
   try { compositeOne(ctx2d(c), L, 1); } finally { L.visible = keep[0]; L.opacity = keep[1]; L.blend = keep[2]; }
   return c;
 }
+/* o.nested＝智能对象里的内嵌文件（参考线、路径、配置文件是母文件的，不写）；o.patterns:'bake'＝图案叠加／纹理画成像素、不写文件级 Patt（保底）；o.pattLayout 只给复测样品换 Patt 写法 */
 function psdEncodeDoc(withLayers, o){
   if (!window.PsdIO) throw new PsBad('PSD codec not loaded');
-  return PsdIO.encode({width:Doc.width, height:Doc.height, dpi:Doc.dpi || 72, merged:rgbaOfCanvas(renderDoc({})), items:withLayers ? psdItemsOf() : [], psb:!!(o && o.psb)});
+  const nested = !!(o && o.nested), ctx = {linked:[], bakePatterns:!!(o && o.patterns === 'bake')};
+  const items = withLayers ? psdItemsOf(ctx) : [];
+  const guides = nested ? [] : (Array.isArray(Doc.aiGuides) ? Doc.aiGuides : []).map(g => ({vertical:!!g.vertical, pos:+g.pos}));
+  return PsdIO.encode({width:Doc.width, height:Doc.height, dpi:Doc.dpi || 72, merged:rgbaOfCanvas(renderDoc({})), items, psb:!!(o && o.psb),
+    guides, paths:nested ? [] : psdPathsOf(), icc:nested ? null : psdIccOf(), linked:ctx.linked, pattLayout:o && o.pattLayout});
 }
-/* 文件 ⇒ PSD 图层清单（下→上·组照 PSD：组结束、子层、组）：每层像素（文件大小）＋文字／形状／样式的活资料；ORA 也照这份写 */
-function psdItemsOf(){
+/* 文件 ⇒ PSD 图层清单（下→上·组照 PSD：组结束、子层、组）：每层像素（文件大小）＋文字／形状／样式／调整／智能对象／矢量蒙版的活资料；ORA 也照这份写（不给 ctx＝不做智能对象） */
+function psdItemsOf(ctx){
   const W = Doc.width, H = Doc.height, items = [];
   const base = L => ({name:L.name, opacity:L.opacity === undefined ? 1 : L.opacity, blend:L.blend || 'normal', hidden:!L.visible, mask:psdMaskOf(L), blendIf:BlendIf.isDefault(L.blendIf) ? null : L.blendIf});
   const walk = list => { for (const L of list){
     if (L._sigSkip) continue;
-    if (L.kind === 'group'){ items.push({kind:'groupEnd'}); walk(Groups.children(L)); const fx = psdFxOf(L); items.push(Object.assign(base(L), {kind:'group', open:!(L.data && L.data.expanded === false)}, Array.isArray(fx) ? {fx} : {})); continue; }
-    const fx = psdFxOf(L), bake = fx === 'bake';
+    if (L.kind === 'group'){ items.push({kind:'groupEnd'}); walk(Groups.children(L)); const fx = psdFxOf(L, ctx && ctx.bakePatterns); items.push(Object.assign(base(L), {kind:'group', open:!(L.data && L.data.expanded === false)}, Array.isArray(fx) ? {fx} : {})); continue; }
+    // 调整图层：没像素、写调整资源块（蒙版、不透明度、混合、剪贴照写）
+    if (L.adjust){ const a = psdAdjOf(L); if (a){ const it = Object.assign(base(L), {kind:'layer', rgba:null, clipped:!!L.clipped, fillOpacity:L.fillOpacity, adjust:a}); const vm = psdVmaskOf(L); if (vm) it.vmask = vm; items.push(it); continue; } }
+    const fx = psdFxOf(L, ctx && ctx.bakePatterns), bake = fx === 'bake';
     let rgba = null; try { rgba = rgbaOfCanvas(bake ? psdBaked(L) : docSpace(renderLayer(L, 1), L)); } catch (e){ console.warn('psd layer', L.name, e); }
     const it = Object.assign(base(L), {kind:'layer', rgba, clipped:!!L.clipped, fillOpacity:bake ? 1 : L.fillOpacity});
     if (bake) it.mask = null;   // 蒙版已画进像素
     else {
       if (fx) it.fx = fx;
-      try { if (L.kind === 'text'){ const t = psdTextOf(L); if (t) it.text = t; } else if (L.kind === 'vector'){ const s = psdShapeOf(L); if (s) it.shape = s; } }
+      try { if (L.kind === 'text'){ const t = psdTextOf(L); if (t) it.text = t; } else if (L.kind === 'vector'){ const s = psdShapeOf(L); if (s) it.shape = s; }
+        else if (L.kind === 'smart'){ const s = psdSmartOf(L, ctx); if (s) it.smart = s; } }
       catch (e){ console.warn('psd live layer', L.name, e); }
+      try { if (L.vmask && !it.shape){ const vm = psdVmaskOf(L); if (vm) it.vmask = vm; } } catch (e){ console.warn('psd vector mask', L.name, e); }
     }
     items.push(it);
   } };
@@ -1407,8 +1539,51 @@ function psdShapeLayer(r){
 }
 function psdApplyFx(L, r){
   if (!r.fx || !r.fx.items.length || !(window.PsLayerStyle && PsLayerStyle.fromParams)) return;
-  const items = r.fx.items.map(p => { try { return PsLayerStyle.fromParams(p.kind, p); } catch (_){ return null; } }).filter(Boolean);
+  // 图案：照唯一 ID（我们写的是图案库 id 杂凑成的 UUID：PsdIO.patId）或名字在图案库里找；找不到 ⇒ 这一项不接（照像素）
+  const pat = (id, name) => { const lib = window.PsEdit && PsEdit.patterns; return lib ? (id && (lib.resolve(id) || lib.load().find(q => PsdIO.patId(q.id) === id))) || (name && lib.resolve(name)) || null : null; };
+  const one = p => {
+    if (p.kind === 'bevelEmboss'){
+      const X = window.PsLayer && PsLayer.fxExt && PsLayer.fxExt.bevelEmboss; if (!X) return null;
+      const q = Object.assign({}, p); if (q.texture){ const P = pat(q.texture, q.textureName); if (P) q.texture = P.id; else delete q.texture; }
+      return X.fromParams(q);
+    }
+    if (p.kind === 'patternOverlay'){
+      const P = pat(p.pattern, p.patternName); if (!P) return null;
+      return {kind:'patternOverlay', enabled:true, blend:p.blend || 'normal', opacity:Math.max(0, Math.min(100, p.opacity === undefined ? 100 : p.opacity)) / 100, pattern:P.id, name:P.name,
+        scale:Math.max(0.01, Math.min(10, (p.scale === undefined ? 100 : p.scale) / 100)), angle:p.angle || 0, link:p.link !== false, phase:[p.phaseX || 0, p.phaseY || 0]};
+    }
+    return PsLayerStyle.fromParams(p.kind, p);
+  };
+  const items = r.fx.items.map(p => { try { return one(p); } catch (_){ return null; } }).filter(Boolean);
   if (items.length) L.style = {enabled:r.fx.enabled !== false, items};
+}
+/* PSD 路径（文件坐标的 pre／a／post）⇒ 我们的贝兹形状（白填色：矢量蒙版只看形状） */
+function psdBezier(p, extra){
+  const near = (a, b) => Math.abs(a[0] - b[0]) < 1e-3 && Math.abs(a[1] - b[1]) < 1e-3;
+  return Object.assign({id:uid('S'), type:'bezier', closed:p.closed, fill:'#ffffff', stroke:'none', strokeWidth:0,
+    anchors:p.knots.map(k => ({x:k.a[0], y:k.a[1], in:near(k.pre, k.a) ? null : k.pre.slice(), out:near(k.post, k.a) ? null : k.post.slice()}))}, extra || {});
+}
+/* 调整图层（rec.adjust）⇒ 像素层＋L.adjust（参数照 ps.layer.setAdjustment 的规矩正规化）；读不懂 ⇒ null */
+function psdAdjustLayer(r, W, H){
+  const A = r.adjust; if (!A || !window.PsImage) return null;
+  let params;
+  if (A.kind === 'colorLookup'){
+    // 我们的内建 look（写出时档名＝id.cube）⇒ {lut:id}；别的 .cube ⇒ {data, fileName}；都不行 ⇒ 空的颜色查找
+    const ok = q => { try { PsImage.fromParams('colorLookup', q, null); return true; } catch (_){ return false; } };
+    const look = String(A.lutName || '').replace(/\.cube$/i, ''), d = A.params.dither ? {dither:true} : {};
+    params = look && ok({lut:look}) ? Object.assign(d, {lut:look}) : A.params.data && ok({data:A.params.data, fileName:A.params.fileName}) ? Object.assign(d, {data:A.params.data, fileName:A.params.fileName}) : d;
+  } else { try { params = PsImage.toParams(PsImage.fromParams(A.kind, A.params, null)); } catch (e){ console.warn('psd adjustment', r.name, e); return null; } }
+  const L = Layer.raster(r.name, W, H);
+  L.adjust = {kind:A.kind, params};
+  return L;
+}
+/* 智能对象（rec.placed＋文件级内嵌档）⇒ 智能对象层（来源＝内嵌档解出来的图；四角 ⇒ transform） */
+function psdSmartLayer(r, src){
+  const pl = r.placed; if (!pl || pl.plain === false || !src || !window.Smart || !Layer.smart) return null;   // 变形／透视／智能滤镜 ⇒ 照像素
+  const w = src.canvas.width, h = src.canvas.height, c = pl.corners; if (!c || c.length !== 8 || !(w > 0 && h > 0)) return null;
+  const T = [(c[2] - c[0]) / w, (c[3] - c[1]) / w, (c[6] - c[0]) / h, (c[7] - c[1]) / h, c[0], c[1]].map(v => Math.abs(v) < 1e-12 ? 0 : +v.toPrecision(12));
+  if (!src.entry) src.entry = Smart.fromImage(src.canvas, src.name);                  // 同一个内嵌档的几个实例共用一份来源
+  return Layer.smart(r.name, {source:{id:src.entry.id, name:src.entry.name, type:src.entry.type}, transform:T});
 }
 /* 解好的 PSD → 图层（下→上，组照我们的样子：子层在前、组在后、子层 parent＝组 id）；文字、形状、图层样式读得懂就接成活的（见上） */
 function psdLayers(p){
@@ -1438,22 +1613,51 @@ function psdLayers(p){
       out.push(G); continue;
     }
     let L = null;
-    try { L = r.liveText ? psdTextLayer(r) : r.shape ? psdShapeLayer(r) : null; } catch (e){ console.warn('psd live layer', r.name, e); L = null; }
+    try { L = r.liveText ? psdTextLayer(r) : r.shape ? psdShapeLayer(r) : r.adjust ? psdAdjustLayer(r, W, H) : r.placed ? psdSmartLayer(r, (p.smartSrc || {})[r.placed.id]) : null; }
+    catch (e){ console.warn('psd live layer', r.name, e); L = null; }
     if (!L){ L = Layer.raster(r.name, W, H);
     if (r.rgba){ const [t, l, b, rr] = r.rect, w = rr - l, h = b - t, tmp = mkCanvas(w, h); ctx2d(tmp).putImageData(new ImageData(r.rgba, w, h), 0, 0); L.data.ctx.drawImage(tmp, l, t); } }
     common(L, r);
     if (r.clipped) L.clipped = true;
+    // 像素层／调整层／智能对象的矢量蒙版（文件坐标的贝兹；反相、停用、链接照档）
+    if (r.vmask && L.kind !== 'vector') L.vmask = {shapes:r.vmask.paths.map(q => psdBezier(q)), inverted:!!r.vmask.inverted, enabled:r.vmask.enabled !== false, linked:r.vmask.linked !== false, density:1, feather:0, ax:L.x || 0, ay:L.y || 0};
     out.push(L);
   }
   while (stack.length){ const G = stack.pop(); G.parent = null; out.push(G); }            // 坏档：组没收尾
   return out;
 }
 /* PSD → 换掉目前这份文件（分层；没有图层记录＝合成图开成背景层） */
+/* 文件级内嵌档（lnk2）⇒ {唯一 ID: {canvas, name}}：图片照解、内嵌的 PSD／PSB 用它的合成图（智能对象来源） */
+async function psdSmartSources(p){
+  const out = {};
+  for (const f of p.linked || []){
+    if (!f.data || !f.data.length) continue;
+    try {
+      let c;
+      if (f.data[0] === 0x38 && f.data[1] === 0x42 && f.data[2] === 0x50 && f.data[3] === 0x53) c = await psdCanvas(f.data);
+      else { const bm = await createImageBitmap(new Blob([f.data])); c = mkCanvas(bm.width, bm.height); ctx2d(c).drawImage(bm, 0, 0); if (bm.close) bm.close(); }
+      out[f.id] = {canvas:c, name:f.name || 'image'};
+    } catch (e){ console.warn('psd embedded file', f.name, e); }
+  }
+  return out;
+}
+/* 档里的配置文件描述 ⇒ 内建 id（对不上 ⇒ null：照旧不标记） */
+function psdIccId(desc){
+  if (!desc || !window.PsEdit || !PsEdit.color || !Array.isArray(PsEdit.color.BUILTINS)) return null;
+  const b = PsEdit.color.BUILTINS.find(x => x.space === 'rgb' && x.description.toLowerCase() === String(desc).toLowerCase());
+  return b ? b.id : null;
+}
 async function openPsdAsDoc(src, name){
   const p = await psdDecode(src), W = p.width, H = p.height;
+  p.smartSrc = await psdSmartSources(p);
   let layers = psdLayers(p);
   Doc.reset(W, H, null, false);
   if (typeof p.globalAngle === 'number') Doc.globalLight = {angle:p.globalAngle, altitude:typeof p.globalAltitude === 'number' ? p.globalAltitude : 30};   // 图层样式「使用全局光」照档里的
+  // 文件级：参考线（Doc.aiGuides）、路径（第一条存储路径／工作路径 ⇒ Doc.workPath）、配置文件（描述对得上内建的 ⇒ Doc.iccProfile）
+  if (p.guides && p.guides.length) Doc.aiGuides = p.guides.map(g => ({vertical:!!g.vertical, pos:g.pos}));
+  const wp = (p.paths || []).find(q => !q.work) || (p.paths || [])[0];
+  if (wp) Doc.workPath = {layerId:null, subpaths:wp.paths.map(q => { const b = psdBezier(q); return {closed:b.closed, anchors:b.anchors}; })};
+  const iccId = psdIccId(p.iccDescription); if (iccId) Doc.iccProfile = iccId;
   if (!layers.length){
     const L = Layer.raster(Lang.t('layer.bg'), W, H);
     if (p.merged){ const t = mkCanvas(W, H); ctx2d(t).putImageData(new ImageData(p.merged, W, H), 0, 0); L.data.ctx.drawImage(t, 0, 0); }
@@ -1615,7 +1819,9 @@ async function writeDoc(name, format, p){
   if (format === 'png') return await CMD.run('file.exportPNG', {scale:1, name});
   if (format === 'svg') return await CMD.run('file.exportSVG', {name});
   if (format === 'psd' || format === 'psb'){                          // psb＝大型文件（同一套写法·长度栏放大）
-    const bytes = psdEncodeDoc(p.layers !== false, {psb:format === 'psb'});
+    const pp = p.psdPatterns === undefined ? 'native' : String(p.psdPatterns);
+    if (pp !== 'native' && pp !== 'bake') throw new PsBad(`unknown psdPatterns \`${pp}\` (native|bake)`);
+    const bytes = psdEncodeDoc(p.layers !== false, {psb:format === 'psb', patterns:pp});
     if (p._handle){ await writeHandle(p._handle, bytes); return {file:name + '.' + format, bytes:bytes.length, inPlace:true}; }   // 「存储为」挑了位置／「存储」覆盖原档
     return await sink(name + '.' + format, bytes, 'image/vnd.adobe.photoshop');
   }
@@ -1766,8 +1972,8 @@ function saveAsDialog(p, copy, done){
   }, onCancel:() => { const x = {ok:false, cancelled:true}; if (done) done(x); return x; }});
   return opened();
 }
-reg('file.saveAs', '{name 文件名（不含扩展名也行）, format:"dlcanvas|psd|ai|png|jpg|webp|tif|svg|pdf"="dlcanvas", quality:0..12=10（jpg/pdf）} 存储为：存成指定名字与格式，之后「存储」就用这个名字；任何格式都算存过 → {name, format}', p => saveAs(p, false), {dialog:p => saveAsDialog(p, false)});
-reg('file.saveACopy', '{name, format:"dlcanvas|psd|ai|png|jpg|webp|tif|svg|pdf"="dlcanvas", quality:0..12=10, layers:bool=true（false＝工程档／PSD 只存拼合后的一层）} 存储副本：另存一份，不改文件名、不算存过 → {name, format}', p => saveAs(p, true), {dialog:p => saveAsDialog(p, true)});
+reg('file.saveAs', '{name 文件名（不含扩展名也行）, format:"dlcanvas|psd|ai|png|jpg|webp|tif|svg|pdf"="dlcanvas", quality:0..12=10（jpg/pdf）, psdPatterns:"native|bake"="native"（PSD：bake＝图案叠加／纹理画成像素、不写档内图案）} 存储为：存成指定名字与格式，之后「存储」就用这个名字；任何格式都算存过 → {name, format}', p => saveAs(p, false), {dialog:p => saveAsDialog(p, false)});
+reg('file.saveACopy', '{name, format:"dlcanvas|psd|ai|png|jpg|webp|tif|svg|pdf"="dlcanvas", quality:0..12=10, layers:bool=true（false＝工程档／PSD 只存拼合后的一层）, psdPatterns:"native|bake"="native"} 存储副本：另存一份，不改文件名、不算存过 → {name, format}', p => saveAs(p, true), {dialog:p => saveAsDialog(p, true)});
 /* 存储：存过工程档 ⇒ 就地存；没存过或上次存的是不分层格式 ⇒ 界面开「存储为」，agent 直接存成工程档（menus.rs:227 saves_in_place） */
 /* PS：正在编辑智能对象内容时「存储」＝把内容存回那个智能对象（母文件跟着更新） */
 // 编辑内容开成的分页（menus/impl/docs.js）：存储＝更新母文件的智能对象、分页留着（PS）；没载入多文件档才退回「完成并更新」

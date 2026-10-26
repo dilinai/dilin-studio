@@ -7,6 +7,7 @@
 //     filter?:      { range, criteria?: { [列字母]: 条件 } }          每张表一个筛选区（Excel 口径）·range 第一行＝表头（出筛选钮）·其下是资料行
 //                   条件＝{ values: [显示字…] }（按值勾选·'' 代表空白）或 { condition: { op, value?, value2? } }
 //     validations?: [{ id, range, type:'list', list? | source?, allowBlank?, showError? }]   下拉清单（list＝选项·source＝本页某区间的值）
+//     hiddenRows?／hiddenCols?: [0 起的行号／栏号]                   手动隐藏的行／栏（跟筛选藏的分开存：清筛选不会把手动藏的放出来·Excel 同）
 //                   allowBlank 缺省＝true（可留空）·showError 缺省＝true（打清单外的值 ⇒ 拒）·false ⇒ 收下但提示
 //   口径：
 //     - 筛选比的是格子显示的字（套了数字格式之后·Excel 按值勾选同口径）；大于／小于／介于：两边都是数字才按数字比·都是文字按字比·一数一字 ⇒ 不过
@@ -27,7 +28,7 @@ export type FilterCondition = { op: FilterOp; value?: string; value2?: string }
 export type FilterCriterion = { values: string[] } | { condition: FilterCondition }
 export type SheetFilter = { range: string; criteria?: Record<string, FilterCriterion> }
 export type SheetValidation = { id: string; range: string; type: 'list'; list?: string[]; source?: string; allowBlank?: boolean; showError?: boolean }
-export type SheetViewState = { freeze?: SheetFreeze; filter?: SheetFilter; validations?: SheetValidation[] }
+export type SheetViewState = { freeze?: SheetFreeze; filter?: SheetFilter; validations?: SheetValidation[]; hiddenRows?: number[]; hiddenCols?: number[] }
 /** 带这三键的 sheet 内容（formula.ts SheetContent 不动·这里扩） */
 export type ViewContent = SheetContent & SheetViewState
 
@@ -40,6 +41,9 @@ export const VALIDATIONS_MAX = 200
 export const LIST_ITEMS_MAX = 500
 /** Excel 直接写在验证里的清单（formula1 "a,b,c"）连逗号最多 255 字——超了 Excel 打不开·要改用 source 区间 */
 export const LIST_CHARS_MAX = 255
+/** 手动隐藏的行／栏各至多几条 */
+export const HIDDEN_MAX = 5000
+const MAX_ROW_IDX = 999998, MAX_COL_IDX = 18277
 
 const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v)
 
@@ -173,7 +177,14 @@ export function sanitizeValidations(input: unknown): SheetValidation[] | undefin
   return out.length ? out : undefined
 }
 
-/** 三键一起净化（content.ts sanitizeSheetContent 一行调用）·没有的键不回 */
+/** 隐藏的行／栏：0 起的整数·去重排序·至多 HIDDEN_MAX·空 ⇒ undefined */
+export function sanitizeHidden(input: unknown, maxIndex: number): number[] | undefined {
+  if (!Array.isArray(input)) return undefined
+  const out = [...new Set(input.filter((v): v is number => isInt(v) && v >= 0 && v <= maxIndex))].sort((a, b) => a - b).slice(0, HIDDEN_MAX)
+  return out.length ? out : undefined
+}
+
+/** 几键一起净化（content.ts sanitizeSheetContent 一行调用）·没有的键不回 */
 export function sanitizeSheetView(input: unknown): SheetViewState {
   if (!input || typeof input !== 'object') return {}
   const x = input as Record<string, unknown>
@@ -181,7 +192,26 @@ export function sanitizeSheetView(input: unknown): SheetViewState {
   const f = sanitizeFreeze(x.freeze); if (f) out.freeze = f
   const fl = sanitizeFilter(x.filter); if (fl) out.filter = fl
   const vs = sanitizeValidations(x.validations); if (vs) out.validations = vs
+  const hr = sanitizeHidden(x.hiddenRows, MAX_ROW_IDX); if (hr) out.hiddenRows = hr
+  const hc = sanitizeHidden(x.hiddenCols, MAX_COL_IDX); if (hc) out.hiddenCols = hc
   return out
+}
+
+/** 网页网格／列印／导出要藏的行（0 起）：手动藏的＋被筛掉的 */
+export function hiddenRowSet(content: ViewContent | null | undefined, reader?: CellReader): Set<number> {
+  const out = filteredRows(content, reader)
+  for (const r of content?.hiddenRows ?? []) out.add(r)
+  return out
+}
+/** 要藏的栏（0 起） */
+export function hiddenColSet(content: ViewContent | null | undefined): Set<number> { return new Set(content?.hiddenCols ?? []) }
+/** 把 [from..to] 设成藏／不藏 ⇒ 新清单（空 ⇒ undefined） */
+export function setHidden(list: number[] | undefined, from: number, to: number, hide: boolean): number[] | undefined {
+  const set = new Set(list ?? [])
+  for (let i = Math.min(from, to); i <= Math.max(from, to); i++) { if (hide) set.add(i); else set.delete(i) }
+  if (set.size > HIDDEN_MAX) throw new SheetViewError(`at most ${HIDDEN_MAX} hidden rows or columns per tab`)
+  const out = [...set].sort((a, b) => a - b)
+  return out.length ? out : undefined
 }
 
 // ── 读格（显示字＋数字值）────────────────────────────────────────────────
@@ -443,6 +473,13 @@ export function shiftViewForStruct(content: ViewContent, axis: Axis, mode: 'inse
     if (out.length) content.validations = out; else delete content.validations
     if (gone) warnings.push(`${gone} dropdown list(s) were removed (their cells or their source range were deleted).`)
   }
+  // 手动隐藏的行／栏：跟着搬·被删的那几条拿掉
+  const hk = axis === 'row' ? 'hiddenRows' : 'hiddenCols'
+  if (content[hk]?.length) {
+    const lim = axis === 'row' ? max.rows : max.cols
+    const next = content[hk]!.map(v => shiftIndex(v, mode, at, count)).filter((v): v is number => v !== null && v <= lim)
+    if (next.length) content[hk] = next; else delete content[hk]
+  }
   return warnings
 }
 
@@ -628,12 +665,40 @@ function opValidate(content: ViewContent, o: Record<string, unknown>, idx: numbe
   return { op: 'validate', id: added.id, range: added.range, ...(added.list ? { list: added.list } : { source: added.source, options: opts.slice(0, 50) }), allow_blank: added.allowBlank !== false, reject_invalid: added.showError !== false }
 }
 
-export const VIEW_OP_NAMES = ['freeze', 'filter', 'validate'] as const
+/** hide：{ rows?: "2:5"|"5", cols?: "B:D"|"B", hidden?: true（缺省藏·false＝取消隐藏）, unhide_all?: true } */
+function opHide(content: ViewContent, o: Record<string, unknown>, idx: number): ViewOpResult {
+  const hide = optBool(o, 'hidden', idx) ?? true
+  const all = optBool(o, 'unhide_all', idx)
+  if (all) {
+    if (o.rows !== undefined || o.cols !== undefined) fail(`ops[${idx}]: unhide_all:true shows every hidden row and column — don't combine it with rows or cols`)
+    delete content.hiddenRows; delete content.hiddenCols
+  } else {
+    if ((o.rows === undefined || o.rows === null) && (o.cols === undefined || o.cols === null)) fail(`ops[${idx}]: give rows (like "2:5" or "7") and/or cols (like "B:D" or "C")`)
+    if (o.rows !== undefined && o.rows !== null) {
+      const m = typeof o.rows === 'string' ? /^\s*(\d{1,7})\s*(?::\s*(\d{1,7})\s*)?$/.exec(o.rows) : typeof o.rows === 'number' && isInt(o.rows) ? [String(o.rows), String(o.rows)] as unknown as RegExpExecArray : null
+      const a = m ? Number(m[1]) : NaN, b = m ? Number(m[2] ?? m[1]) : NaN
+      if (!m || a < 1 || b < 1 || a - 1 > MAX_ROW_IDX || b - 1 > MAX_ROW_IDX) fail(`ops[${idx}].rows must be row numbers like "2:5" or "7"`)
+      content.hiddenRows = setHidden(content.hiddenRows, a - 1, b - 1, hide)
+      if (!content.hiddenRows) delete content.hiddenRows
+    }
+    if (o.cols !== undefined && o.cols !== null) {
+      const m = typeof o.cols === 'string' ? /^\s*\$?([A-Za-z]{1,3})\s*(?::\s*\$?([A-Za-z]{1,3})\s*)?$/.exec(o.cols) : null
+      const a = m ? colToIndex(m[1]) : NaN, b = m ? colToIndex(m[2] ?? m[1]) : NaN
+      if (!m || a > MAX_COL_IDX || b > MAX_COL_IDX) fail(`ops[${idx}].cols must be column letters like "B:D" or "C"`)
+      content.hiddenCols = setHidden(content.hiddenCols, a, b, hide)
+      if (!content.hiddenCols) delete content.hiddenCols
+    }
+  }
+  return { op: 'hide', hidden_rows: (content.hiddenRows ?? []).slice(0, VIEW_HIDDEN_ROWS_LIST_MAX).map(r => r + 1), hidden_cols: (content.hiddenCols ?? []).slice(0, VIEW_HIDDEN_ROWS_LIST_MAX).map(c => indexToCol(c)), hidden_row_count: content.hiddenRows?.length ?? 0, hidden_col_count: content.hiddenCols?.length ?? 0 }
+}
+
+export const VIEW_OP_NAMES = ['freeze', 'filter', 'validate', 'hide'] as const
 export function applyViewOp(content: ViewContent, o: Record<string, unknown>, idx: number, ctx: ViewOpCtx, warnings: string[]): ViewOpResult {
   switch (o.op) {
     case 'freeze': return opFreeze(content, o, idx)
     case 'filter': return opFilter(content, o, idx, ctx)
     case 'validate': return opValidate(content, o, idx, ctx, warnings)
+    case 'hide': return opHide(content, o, idx)
   }
   return fail(`ops[${idx}].op is not a view op`)
 }
@@ -644,6 +709,8 @@ export type ViewOut = {
   freeze?: { rows: number; cols: number; top_left_cell: string }
   filter?: { range: string; header_row: number; criteria: Record<string, FilterCriterion>; hidden_rows: number[]; hidden_count: number }
   validations?: Array<{ id: string; range: string; list?: string[]; source?: string; allow_blank: boolean; reject_invalid: boolean }>
+  /** 手动隐藏的行（1 起）／栏（字母）·筛选藏的行在 filter.hidden_rows */
+  hidden?: { rows: number[]; cols: string[]; row_count: number; col_count: number }
 }
 export const VIEW_HIDDEN_ROWS_LIST_MAX = 200
 export function viewOut(content: ViewContent | null | undefined, rect?: Rect | null): ViewOut {
@@ -657,5 +724,7 @@ export function viewOut(content: ViewContent | null | undefined, rect?: Rect | n
   }
   const vs = (content?.validations ?? []).filter(v => { if (!rect) return true; const r = parseRect(v.range); return !!r && rectsOverlap(r, rect) })
   if (vs.length) out.validations = vs.map(v => ({ id: v.id, range: v.range, ...(v.list ? { list: v.list } : { source: v.source }), allow_blank: v.allowBlank !== false, reject_invalid: v.showError !== false }))
+  const hr = sanitizeHidden(content?.hiddenRows, MAX_ROW_IDX), hc = sanitizeHidden(content?.hiddenCols, MAX_COL_IDX)
+  if (hr || hc) out.hidden = { rows: (hr ?? []).slice(0, VIEW_HIDDEN_ROWS_LIST_MAX).map(r => r + 1), cols: (hc ?? []).slice(0, VIEW_HIDDEN_ROWS_LIST_MAX).map(c => indexToCol(c)), row_count: hr?.length ?? 0, col_count: hc?.length ?? 0 }
   return out
 }

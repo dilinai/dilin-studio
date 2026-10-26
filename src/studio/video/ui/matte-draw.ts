@@ -5,8 +5,12 @@ import { stickerBox, stickerById, stickerPose, stickerSrc } from '../lib/sticker
 import { clipAnimPose } from '../lib/clip-look.pure'
 import { followAffine, followAt } from '../lib/motion-track.pure'
 import { matteAlpha } from '../lib/mask-matte.pure'
-import type { MatteOp } from '../lib/export.pure'
+import type { DrawOp, MatteOp } from '../lib/export.pure'
 import type { Tracks } from '../lib/timeline.pure'
+
+type TsOp = Extract<DrawOp, { kind: 'text' | 'sticker' }>
+/** 这支只画文字／贴纸遮罩（画面层当遮罩的走汇出那支 drawMedia·预览 PlanCanvas） */
+const tsOps = (m: MatteOp): TsOp[] => m.ops.filter((o): o is TsOp => o.kind === 'text' || o.kind === 'sticker')
 
 /** 贴纸档名 ⇒ 现成的图（汇出先 await 好·预览拿快取·还没载好 ⇒ null 先不画） */
 export const matteStickerFile = (id: string): string | null => { const it = stickerById(id); return it ? stickerSrc(it) : null }
@@ -15,7 +19,7 @@ export const matteStickerFile = (id: string): string | null => { const it = stic
 export function drawMatteOps(c: CanvasRenderingContext2D, m: MatteOp, W: number, H: number, t: number, tracks: Tracks, img: (file: string) => CanvasImageSource | null): void {
   c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over'
   c.clearRect(0, 0, W, H)
-  for (const op of m.ops) {
+  for (const op of tsOps(m)) {
     c.save()
     const fo = followAt(tracks, op.clip, t, W / H)
     if (fo) c.transform(...followAffine(fo, W, H))
@@ -51,7 +55,7 @@ const pvUrls = new Map<string, string>()
 /** 预览：遮罩图的 CSS url（同样的输入快取着·免得每格重画） */
 export function matteCssUrl(m: MatteOp, t: number, tracks: Tracks, ratio: number): string {
   const W = 640, H = Math.max(1, Math.round(W / (ratio > 0 && Number.isFinite(ratio) ? ratio : 16 / 9)))
-  const key = JSON.stringify([m.mode, m.invert, W, H, m.ops.map((o) => [o.kind, o.clip.id, o.body, o.kind === 'text' ? o.at : null]), m.ops.some((o) => o.clip.follow) ? t : 0, m.ops.filter((o) => o.kind === 'sticker').map((o) => { const f = matteStickerFile(o.body.sticker); return f ? !!pvImg(f) : false })])
+  const key = JSON.stringify([m.mode, m.invert, W, H, tsOps(m).map((o) => [o.kind, o.clip.id, o.body, o.kind === 'text' ? o.at : null]), tsOps(m).some((o) => o.clip.follow) ? t : 0, tsOps(m).filter((o): o is Extract<TsOp, { kind: 'sticker' }> => o.kind === 'sticker').map((o) => { const f = matteStickerFile(o.body.sticker); return f ? !!pvImg(f) : false })])
   const hit = pvUrls.get(key)
   if (hit) return hit
   if (!pvCv) pvCv = document.createElement('canvas')

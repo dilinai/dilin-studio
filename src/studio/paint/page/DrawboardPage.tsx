@@ -18,6 +18,7 @@ import { isSimplifiedSite, studioStaticHref } from '../../shared/host'
 import { PanelCollapseButton, PanelCollapsedEdge } from '../../shared/ported/PanelCollapseHandle'
 import { DRAWBOARD_MIME, drawboardOldLayout, drawboardTitle, exportPngName, isDrawboardFileName, isDrawboardImage } from './drawboard-file.pure'
 import { DRAWBOARD_LAYOUT_DEFAULT, DRAWBOARD_LAYOUT_KEY, clampLayout, dragLayout, parseLayout, type DrawboardLayout, type DrawboardTab } from './drawboard-layout.pure'
+import { installGenAi } from './genai'
 import { TAB_STRIP_H, applyLanguage, canvasPng, markEngineSaved, createCloudTabs, createDocLock, installCloudTabs, installPageCommands, setSaveBadge, withBusyCursor, type AutosaveStatus, type SavedChannel, installChrome, installCommands, leftRect, openSavedChannel, popupOver, setLeft, siteOf, startDrag, watchDirty, type ApiErr, type CloudTab, type DlSite, type Rect } from './drawboard-host'
 import type { PaintLoadFail, PaintPageHost } from './host'
 import { psdBlob } from './agent-export'
@@ -347,6 +348,8 @@ export default function DrawboardPage({ host }: { host: PaintPageHost }) {
     })
     // 宿主自己要装的（登入版：桌面版画板「列印」改走主页面 print）
     h0.install?.(s, win)
+    // 生成式 AI：登入版挂网站生图那组（扣点·生成的图放这份画板的资料夹）；游客版／单机版没有 ⇒ 画板出「需登入堤麟」。本地去背的模型来源两边都可给
+    installGenAi(win, h0.genai ? h0.genai({ folderId: () => projRef.current?.folder_id ?? null }) : null, h0.segment?.() ?? null)
     // 画板分页列的每个云档分页各绑一份档（页面起好时那个分页先登记·还没绑档）；分页切了／关了跟着换「现在这份」
     const tabs = s.Tabs
     const hc = handlers.current

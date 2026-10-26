@@ -92,6 +92,8 @@ const Hist = PsWindow.history = {
     'layer.newVector':[L3('新增圖層', '新建图层', 'New Layer'), null], 'ps.layer.new.layerViaCopy':[L3('拷貝的圖層', '通过拷贝的图层', 'Layer Via Copy'), null],
     'layer.addImageFromURL':[L3('置入', '置入', 'Place'), null], 'shape.bezier':[L3('鋼筆', '钢笔', 'Pen'), 'pen'],
     'ps.edit.clear':[L3('清除', '清除', 'Clear'), null], 'paint.fillRect':[L3('填色', '填充', 'Fill'), null], 'ps.layer.mergeDown':[L3('向下合併', '向下合并', 'Merge Down'), null],
+    'ps.history.snapshot.new':[L3('新增快照', '新建快照', 'New Snapshot'), null], 'ps.history.snapshot.restore':[L3('快照', '快照', 'Snapshot'), null],
+    'ps.history.snapshot.delete':[L3('刪除快照', '删除快照', 'Delete Snapshot'), null], 'ps.history.snapshot.rename':[L3('快照名稱', '快照名称', 'Snapshot Name'), null],
   },
   labelOf(id, p){
     p = p || {};
@@ -144,6 +146,96 @@ CMD.reg('ps.history.goto', {i18n:'', params:'{index: 第几列（0＝打开）} 
   const n = Hist.go(clamp(+p.index || 0, 0, History.past.length + History.future.length));
   return {ok:true, steps:n, current:History.past.length};
 });
+/* ═══════════ 历史记录快照（PS 历史记录面板上方那串：📷 建立新快照、点快照＝文件回到那时、🗑 删除；存进工程档 historySnapshots）═══════════
+   一张快照＝History.snap() 拍的整份文件（图层、选区、尺寸…）＋名字。快照清单本身也进历史（建／删／改名都能 Ctrl+Z）：
+   History.snap／restore 多带一栏 hsnaps（清单的参照拷贝；快照拍好就不再改，共用没关系）。
+   存档：每张快照的图层照工程档的写法（Project._layerOut，内嵌层的写法＝连 x2 栏）编一次就记住（快照不会变）；载档时照 _layerIn 读回来。
+   换文件（file.new／开档 ⇒ Doc.serial 变）清单就清空（PS 的快照也只活在那份文件里）。 */
+const Snaps = PsWindow.snapshots = {
+  serial:null, items:[], sel:null,
+  list(){ if (this.serial !== Doc.serial){ this.serial = Doc.serial; this.items = []; this.sel = null; } return this.items; },
+  setList(a){ this.serial = Doc.serial; this.items = a; if (this.sel && !a.some(s => s.id === this.sel)) this.sel = null; },
+  find(p){
+    const L = this.list();
+    if (p.id !== undefined) return L.find(s => s.id === p.id) || null;
+    if (p.name !== undefined) return L.find(s => s.name === p.name) || null;
+    if (Number.isInteger(p.index)) return L[p.index] || null;
+    return this.sel ? L.find(s => s.id === this.sel) || null : null;
+  },
+  nextName(){ const used = new Set(this.list().map(s => s.name)); let n = this.list().length + 1; for (;;){ const nm = T(L3('快照 ', '快照 ', 'Snapshot ')) + n; if (!used.has(nm)) return nm; n++; } },
+  /* 存档：一张快照 → {id, name, width, height, dpi, activeId, layers}（图层用工程档的写法；编好就记住） */
+  encode(s){
+    if (s._json) return s._json;
+    const st = s.state, stats = {encoded:[], reused:[], refs:[]};
+    const layers = st.layers.map(o => Project._layerOut(History._layerFrom(o), false, stats, Project._gen, true));
+    s._json = {id:s.id, name:s.name, width:st.width, height:st.height, dpi:st.dpi, activeId:st.activeId, layers};
+    return s._json;
+  },
+  async decode(o, errors){
+    const keep = {w:Doc.width, h:Doc.height}; Doc.width = +o.width || Doc.width; Doc.height = +o.height || Doc.height;   // 蒙版画布照快照那时的文件尺寸开
+    const layers = [];
+    try { for (const q of (o.layers || [])) layers.push(History._layerSnap(await Project._layerIn(q, errors, true))); }
+    finally { Doc.width = keep.w; Doc.height = keep.h; }
+    return {id:String(o.id), name:String(o.name || ''), _json:o,
+      state:{width:+o.width || Doc.width, height:+o.height || Doc.height, activeId:o.activeId || null, sel:null, vsel:null, aiDoc:null, globalLight:null, dpi:o.dpi, layers}};
+  }
+};
+if (!History.__psSnaps){
+  History.__psSnaps = true;
+  const snap0 = History.snap, restore0 = History.restore, rip0 = History.restoreInPlace;
+  History.snap = function(){ const s = snap0.apply(this, arguments); s.hsnaps = Snaps.list().slice(); return s; };
+  History.restore = function(s){ const r = restore0.apply(this, arguments); if (s && s.hsnaps) Snaps.setList(s.hsnaps.slice()); return r; };
+  History.restoreInPlace = function(s){ const r = rip0.apply(this, arguments); if (s && s.hsnaps) Snaps.setList(s.hsnaps.slice()); return r; };
+  if (SiteHooks.extraSigs) SiteHooks.extraSigs.push(() => 'hsnap:' + Snaps.list().map(s => s.id + '=' + s.name).join('\u0003'));   // 快照存进工程档 ⇒ 建／删／改名都算改动（自动存档）
+  const ser = Project.serialize, load = Project.load;
+  Project.serialize = function(){ const o = ser.apply(this, arguments); const L = Snaps.list(); if (o && L.length && !(Smart.session && Smart.session.parentJSON)) o.historySnapshots = L.map(s => Snaps.encode(s)); return o; };
+  Project.load = async function(json){
+    const r = await load.apply(this, arguments);
+    const list = [];
+    if (json && Array.isArray(json.historySnapshots)){ const errors = []; for (const o of json.historySnapshots){ try { list.push(await Snaps.decode(o, errors)); } catch (e){ console.error('[history snapshot]', e); } } }
+    Snaps.setList(list);
+    return r;
+  };
+}
+const snapRef = p => (p.id !== undefined || p.name !== undefined || p.index !== undefined) ? Snaps.find(p) : null;
+CMD.reg('ps.history.snapshot.new', {i18n:'', undoable:true,
+  params:'{name?（缺省「快照 N」）} 历史记录面板 📷「建立新快照」：把目前整份文件（图层、选区、尺寸）拍成一张快照，排在面板上方；快照存进工程档 → {ok, id, name, count}'}, p => {
+  const st = History.snap(); delete st.hsnaps; delete st._next; delete st._nextIcon;
+  const name = typeof p.name === 'string' && p.name.trim() ? p.name.trim() : Snaps.nextName();
+  if (Snaps.list().some(s => s.name === name)) return {ok:false, error:`ps.history.snapshot.new: a snapshot named "${name}" already exists`};
+  const s = {id:'HS' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, state:st};
+  Snaps.setList(Snaps.list().concat([s])); Snaps.sel = s.id;
+  return {ok:true, id:s.id, name, count:Snaps.list().length};
+});
+CMD.reg('ps.history.snapshot.restore', {i18n:'', undoable:true,
+  params:'{id?|name?|index?（缺省＝面板上选中的快照）} 点历史记录面板上的快照：文件整份回到拍快照那时（一步历史，Ctrl+Z 退回）→ {ok, id, name}'}, p => {
+  const s = snapRef(p) || (Object.keys(p).length ? null : Snaps.find({}));
+  if (!s) return {ok:false, error:'ps.history.snapshot.restore: no such snapshot (see ps.history.snapshot.list)'};
+  const keep = Snaps.list().slice();
+  History.restore(Object.assign({}, s.state, {hsnaps:keep}));        // 图层另做一份（_layerFrom 拷画布），快照本身不被改到；清单不动
+  Snaps.sel = s.id;
+  return {ok:true, id:s.id, name:s.name};
+});
+CMD.reg('ps.history.snapshot.delete', {i18n:'', undoable:true,
+  params:'{id?|name?|index?（缺省＝面板上选中的快照）} 历史记录面板 🗑：删掉一张快照（文件不动；Ctrl+Z 拿回来）→ {ok, count}'}, p => {
+  const s = snapRef(p) || (Object.keys(p).length ? null : Snaps.find({}));
+  if (!s) return {ok:false, error:'ps.history.snapshot.delete: no such snapshot'};
+  Snaps.setList(Snaps.list().filter(x => x !== s));
+  return {ok:true, count:Snaps.list().length};
+});
+CMD.reg('ps.history.snapshot.rename', {i18n:'', undoable:true,
+  params:'{id?|index?（缺省＝选中的）, name} 快照改名（PS：双击快照名）→ {ok, id, name}'}, p => {
+  const s = snapRef({id:p.id, index:p.index}) || (p.id === undefined && p.index === undefined ? Snaps.find({}) : null);
+  const name = typeof p.name === 'string' ? p.name.trim() : '';
+  if (!s) return {ok:false, error:'ps.history.snapshot.rename: no such snapshot'};
+  if (!name) return {ok:false, error:'ps.history.snapshot.rename: `name` is required'};
+  if (Snaps.list().some(x => x !== s && x.name === name)) return {ok:false, error:`ps.history.snapshot.rename: a snapshot named "${name}" already exists`};
+  const n = Object.assign({}, s, {name}); delete n._json;              // 快照物件不就地改（历史里旧清单还指着旧的那张）
+  Snaps.setList(Snaps.list().map(x => x === s ? n : x));
+  return {ok:true, id:n.id, name};
+});
+CMD.reg('ps.history.snapshot.list', {i18n:'', params:'{} 历史记录面板上的快照 → {ok, snapshots:[{id, name, index, width, height, layers}], selected}'}, () =>
+  ({ok:true, snapshots:Snaps.list().map((s, i) => ({id:s.id, name:s.name, index:i, width:s.state.width, height:s.state.height, layers:s.state.layers.length})), selected:Snaps.sel}));
 P.define('history', {title:L3('步驟記錄', '历史记录', 'History'), w:250, h:300,
   build(b){ b.appendChild(el('div', {class:'hsnap'})); b.appendChild(el('div', {class:'list hlist'})); b.appendChild(el('div', {class:'bar hbar'})); },
   refresh(b){
@@ -151,6 +243,10 @@ P.define('history', {title:L3('步驟記錄', '历史记录', 'History'), w:250,
     const th = el('canvas', {width:28, height:28, style:'vertical-align:middle;margin-right:8px;background:#fff'});
     try { th.getContext('2d').drawImage(composite(Math.min(28 / Doc.width, 28 / Doc.height)), 0, 0); } catch(e){}
     snap.appendChild(el('div', {class:'li', style:'cursor:default'}, [th, el('span', {text:T(L3('未命名', '未标题', 'Untitled'))})]));
+    Snaps.list().forEach((s, i) => snap.appendChild(el('div', {class:'li hsnapRow' + (Snaps.sel === s.id ? ' on' : ''), dataset:{snap:s.id, index:i}, title:T(L3('按一下：回到這張快照；按兩下：改名', '单击：回到这张快照；双击：改名', 'Click: revert to this snapshot; double-click: rename')),
+      onclick:() => runCmd('ps.history.snapshot.restore', {id:s.id}),
+      ondblclick:e => { e.stopPropagation(); const nm = window.prompt(T(L3('快照名稱', '快照名称', 'Snapshot Name')), s.name); if (nm !== null && nm.trim()) runCmd('ps.history.snapshot.rename', {id:s.id, name:nm}); }},
+      [el('span', {class:'hic hic-snap', style:'display:inline-block;width:28px;text-align:center;margin-right:8px', text:'📷'}), el('span', {text:s.name})])));
     const box = b.querySelector('.hlist'); box.innerHTML = '';
     const {rows, current} = Hist.rows();
     const hbs = window.HistoryBrush && HistoryBrush.ui ? (HistoryBrush.ui.state === null || HistoryBrush.ui.state === undefined ? 0 : HistoryBrush.ui.state) : null;   // PS 历史面板左边那格：历史记录画笔的来源
@@ -161,11 +257,11 @@ P.define('history', {title:L3('步驟記錄', '历史记录', 'History'), w:250,
  box.appendChild(el('div', {class:'li' + (r.at === current ? ' on' : '') + (r.redo ? ' fut' : ''), dataset:{at:r.at},
         onclick:() => runCmd('ps.history.goto', {index:r.at})}, [mark, ic, el('span', {text:r.label})])); });
     const on = box.querySelector('.on'); if (on) on.scrollIntoView({block:'nearest'});
-    const bar = b.querySelector('.hbar'); if (!bar.childNodes.length){
-      // panels.rs:1849-1851：三颗钮原码画了但不动作（let _ =）⇒ 照摆、灰掉
-      [['⧉', L3('從目前狀態建立新文件', '从当前状态创建新文档', 'Create new document from current state')], ['📷', L3('建立新快照', '创建新快照', 'Create new snapshot')], ['🗑', L3('刪除目前狀態', '删除当前状态', 'Delete current state')]]
-        .forEach(([t, tip]) => bar.appendChild(btn(t, tip, null, {disabled:true})));
-    }
+    const bar = b.querySelector('.hbar'); bar.innerHTML = '';
+    // panels.rs:1849-1851：原码三颗钮画了但不动作；📷 建立新快照、🗑 删除选中的快照接上（快照见上面 Snaps）；从当前状态新建文档仍灰着
+    bar.appendChild(btn('⧉', L3('從目前狀態建立新文件', '从当前状态创建新文档', 'Create new document from current state'), null, {disabled:true}));
+    bar.appendChild(btn('📷', L3('建立新快照', '创建新快照', 'Create new snapshot'), () => runCmd('ps.history.snapshot.new', {}), {dataset:{act:'snapNew'}}));
+    bar.appendChild(btn('🗑', L3('刪除快照', '删除快照', 'Delete snapshot'), () => runCmd('ps.history.snapshot.delete', {}), {disabled:!Snaps.find({}), dataset:{act:'snapDelete'}}));
   }});
 
 /* ═══════════ 导航器（panels.rs:1070-1124） ═══════════ */
@@ -758,7 +854,7 @@ function layerProps(b, L){
   if (L.kind === 'vector') shapeProps(b, L);
   const Q = quickActions(L);
   if (Q.length && section(b, 'quick', L3('快速動作', '快速操作', 'Quick Actions')))
-    b.appendChild(el('div', {class:'bar', style:'justify-content:stretch'}, Q.map(([n, id]) => btn(T(n), null, () => runCmd(id, id === 'layer.rasterize' ? {id:L.id} : {}), {dataset:{qa:id}, style:'flex:1 1 45%'}))));
+    b.appendChild(el('div', {class:'bar', style:'justify-content:stretch'}, Q.map(([n, id]) => btn(T(n), null, () => runCmd(id, id === 'layer.rasterize' ? {id:L.id} : id === 'ps.layer.removeBackground' ? {layerId:L.id, ui:true} : {}), {dataset:{qa:id}, style:'flex:1 1 45%'}))));
 }
 /* 文字层（type_tool.rs:976 type_properties 的「字元」节；完整的字元／段落面板在 视窗 ▸ 字符） */
 function textProps(b, L){
@@ -1788,12 +1884,13 @@ if (window.Pointer && !Pointer.__psSticky){
 /* ═══════════ 画笔设置／画笔（brush_panel.rs:32-381、brush_sections.rs、brushes_tab.rs、paint/src/presets.rs）
    「画笔设置」页：左边十三节清单（有勾选框的节＝启用；点名字＝显示并启用那节）、右边那节的控件、底下笔触预览（用真的笔刷引擎画）、
    「用这些设定新建画笔」「笔刷回预设」。所有改动都走 brush.set（agent 同一条路）。
-   我们的笔刷引擎（tools/brush.js）只有圆笔尖：纹理、双重画笔、保护纹理三节照摆、灰掉（原码有，引擎没有）；节旁的锁（换预设时保留该节）我们引擎没有 ⇒ 不摆。
-   「画笔」页：内建预设（照 presets.rs 抄圆笔尖的那些）＋自己存的（localStorage dlPsBrushSettingsPresets.v1）＋定义画笔预设存的取样笔尖（灰：引擎不收取样笔尖）；
+   笔尖形状一节上面是笔尖挑选格（圆笔尖＋取样笔尖：内建、定义画笔预设、读入 .abr 的；tools/brush.js BrushTips）；纹理、双重画笔两节接 tools/brush.js；
+   保护纹理照摆、灰掉（引擎没有）；节旁的锁（换预设时保留该节）我们引擎没有 ⇒ 不摆。手上是混合器画笔时双重画笔灰掉（混合器引擎没接）。
+   「画笔」页：内建预设（照 presets.rs 抄圆笔尖的那些）＋自己存的（localStorage dlPsBrushSettingsPresets.v1）＋取样笔尖（点一下＝换成那支笔尖）＋「读入画笔…」（.abr）；
    搜寻框、点一下＝套用（保留目前的平滑设定，照 brush_panel.rs:190 is_current 的说明）、右键改名／删除（自己存的）。 ═══════════ */
 const BrushUI = {tab:0, section:0, filter:''};
 const SECTIONS = [['tip', L3('筆尖形狀', '画笔笔尖形状', 'Brush Tip Shape'), null], ['shapeDynamics', L3('形狀動態', '形状动态', 'Shape Dynamics'), 'shapeDynamics.enabled'],
-  ['scattering', L3('散佈', '散布', 'Scattering'), 'scattering.enabled'], ['texture', L3('紋理', '纹理', 'Texture'), false], ['dualBrush', L3('雙筆刷', '双重画笔', 'Dual Brush'), false],
+  ['scattering', L3('散佈', '散布', 'Scattering'), 'scattering.enabled'], ['texture', L3('紋理', '纹理', 'Texture'), 'texture.enabled'], ['dualBrush', L3('雙筆刷', '双重画笔', 'Dual Brush'), 'dualBrush.enabled'],
   ['colorDynamics', L3('顏色動態', '颜色动态', 'Color Dynamics'), 'colorDynamics.enabled'], ['transfer', L3('轉換', '传递', 'Transfer'), 'transfer.enabled'], ['pose', L3('筆刷姿勢', '画笔笔势', 'Brush Pose'), 'pose.enabled'],
   ['noise', L3('雜訊', '杂色', 'Noise'), 'noise'], ['wetEdges', L3('濕邊', '湿边', 'Wet Edges'), 'wetEdges'], ['buildUp', L3('建立', '建立', 'Build-up'), 'buildUp'], ['smoothing', L3('平滑化', '平滑', 'Smoothing'), null],
   ['protectTexture', L3('保護紋理', '保护纹理', 'Protect Texture'), false]];
@@ -1804,8 +1901,8 @@ const patchOf = (path, v) => { const ks = path.split('.'), out = {}; let c = out
 /* PS：每颗绘画工具各记一份笔尖 ⇒ 画笔设置／画笔面板改的是「手上那颗」的：手上是混合器画笔＝mixer.brush.set／get（tools/mixer.js），其余＝brush.set／get */
 const mixerHand = () => !!(window.ToolState && ToolState.cur === 'mixer' && CMD.map['mixer.brush.set']);
 const BCMD = k => (mixerHand() ? 'mixer.brush.' : 'brush.') + k;
-/* 节旗标：纹理一节只有混合器画笔的引擎做了（tools/brush.js 没有）⇒ 手上是混合器时可开 */
-const secFlag = i => SECTIONS[i][0] === 'texture' && mixerHand() ? 'texture.enabled' : SECTIONS[i][2];
+/* 节旗标：双重画笔只有画笔工具的引擎做了（混合器画笔没接）⇒ 手上是混合器时灰掉 */
+const secFlag = i => SECTIONS[i][0] === 'dualBrush' && mixerHand() ? false : SECTIONS[i][2];
 const bset = (path, v) => runCmd(BCMD('set'), patchOf(path, v));
 CMD.reg('ps.brush.section', {i18n:'', params:'{section:"tip|shapeDynamics|scattering|texture|dualBrush|colorDynamics|transfer|pose|noise|wetEdges|buildUp|smoothing|protectTexture", enable?:bool} 画笔设置：显示那一节（点节名＝显示并启用，照 brush_panel.rs:257；enable:false＝只显示）→ {ok, section, enabled}'}, p => {
   const i = SECTIONS.findIndex(s => s[0] === p.section); if (i < 0) return fail('ps.brush.section: unknown section');
@@ -1840,6 +1937,17 @@ function brushSectionBody(b, g, i){
   const dyn = (label, path, max, minLabel, angle) => { add(pct(label, path + '.jitter', max)); add(control(path, angle)); if (minLabel) add(pct(minLabel, path + '.minimum', 1)); };
   const note = t => add(el('div', {class:'hint', text:T(t)}));
   if (id === 'tip'){
+    // 笔尖挑选格（PS 画笔笔尖形状上面那格）：第一格＝圆笔尖，其余＝取样笔尖（内建、定义画笔预设、读入 .abr）；点一下＝换笔尖（大小回笔尖原大小）
+    if (window.BrushTips && !mixerHand()){
+      const grid = el('div', {dataset:{k:'tipGrid'}, style:'display:flex;flex-wrap:wrap;gap:3px;max-height:124px;overflow:auto;margin-bottom:6px;padding:3px;background:#1e1e1e;border-radius:3px'});
+      const cell = (key, title, draw) => { const c = el('div', {dataset:{tip:key}, title, style:`width:38px;height:38px;flex:0 0 38px;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:3px;border:1px solid ${(g.tip || '') === key ? '#2f7fd8' : 'transparent'};background:${(g.tip || '') === key ? '#2b3a4d' : 'transparent'}`,
+        onclick:() => runCmd('brush.tips.select', {tip:key})}); c.appendChild(draw()); grid.appendChild(c); };
+      cell('', T(L3('圓形筆尖', '圆形笔尖', 'Round tip')), () => el('span', {style:`display:inline-block;width:24px;height:24px;border-radius:50%;background:radial-gradient(circle, #ddd ${Math.round((g.hardness === undefined ? 1 : g.hardness) * 60)}%, transparent 72%)`}));
+      BrushTips.list().forEach(t => cell(t.id, `${t.name} (${t.width}×${t.height})`, () => { const c = BrushTips.thumb(t, 32); c.style.cssText = 'width:32px;height:32px'; return c; }));
+      add(grid);
+      add(el('div', {class:'row', style:'gap:4px;margin-bottom:4px'}, [btn(T(L3('讀入筆刷…', '导入画笔…', 'Import Brushes…')), L3('讀入 Photoshop 筆刷檔（.abr）', '导入 Photoshop 画笔文件（.abr）', 'Import a Photoshop brush file (.abr)'), () => pickAbr(), {dataset:{act:'importAbr'}}),
+        btn(T(L3('定義筆刷…', '定义画笔…', 'Define Brush…')), L3('用目前選取範圍（沒選取＝整個圖層）定義取樣筆尖', '用当前选区（没选区＝整个图层）定义取样笔尖', 'Define a sampled tip from the selection (or the whole layer)'), () => runCmd('ps.edit.defineBrushPreset', {dialog:true}), {dataset:{act:'defineTip'}})]));
+    } else if (mixerHand()) note(L3('混合器筆刷只有圓形筆尖（取樣筆尖只接了筆刷工具）。', '混合器画笔只有圆形笔尖（取样笔尖只接了画笔工具）。', 'The Mixer Brush only has the round tip (sampled tips are wired to the Brush tool).'));
     const sz = Math.round(g.size || 1), r = el('input', {type:'range', min:0, max:Math.log(5000), step:0.01, value:Math.log(Math.max(1, sz)), dataset:{bk:'size'}}), n = numIn(sz, 'sizeNum', {min:1, max:5000, style:'width:64px'});
     r.oninput = () => { n.value = Math.round(Math.exp(+r.value)); }; r.onchange = () => runCmd(BCMD('set'), {size:Math.round(Math.exp(+r.value))}); n.onchange = () => runCmd(BCMD('set'), {size:clamp(Math.round(+n.value), 1, 5000)});
     add(row(L3('尺寸', '大小', 'Size'), r, n, el('span', {text:'px'})));
@@ -1865,7 +1973,7 @@ function brushSectionBody(b, g, i){
     const an = numIn(Math.round(g.angle || 0), 'angle', {min:-180, max:180, style:'width:58px'}), ro = numIn(Math.round((g.roundness === undefined ? 1 : g.roundness) * 100), 'roundness', {min:1, max:100, style:'width:58px'});
     an.onchange = () => runCmd(BCMD('set'), {angle:clamp(Math.round(+an.value), -180, 180)}); ro.onchange = () => runCmd(BCMD('set'), {roundness:clamp(Math.round(+ro.value), 1, 100) / 100});
     add(el('div', {class:'row', style:'align-items:center'}, [ew, el('div', {}, [row(L3('角度：', '角度：', 'Angle:'), an, el('span', {text:'°'})), row(L3('圓度：', '圆度：', 'Roundness:'), ro, el('span', {text:'%'}))])]));
-    add(pct(L3('硬度', '硬度', 'Hardness'), 'hardness', 1));
+    const hd = pct(L3('硬度', '硬度', 'Hardness'), 'hardness', 1); if (g.tip){ hd.style.opacity = .4; hd.querySelector('input').disabled = true; } add(hd);   // 取样笔尖没有硬度（PS 同样灰掉）
     add(chk(L3('間距', '间距', 'Spacing'), 'spacingEnabled'));
     const sp = pct(L3('間距', '间距', 'Spacing'), 'spacing', 10, 0.01); if (!g.spacingEnabled) sp.style.opacity = .4, sp.querySelector('input').disabled = true; add(sp);
   } else if (id === 'shapeDynamics'){
@@ -1902,8 +2010,21 @@ function brushSectionBody(b, g, i){
   else if (id === 'smoothing'){
     add(pct(L3('平滑化', '平滑', 'Smoothing'), 'smoothing.amount', 1)); add(chk(L3('拉繩模式', '拉绳模式', 'Pulled String Mode'), 'smoothing.pulledString'));
     add(chk(L3('筆畫追趕', '描边补齐', 'Stroke Catch-up'), 'smoothing.catchUp')); add(chk(L3('在筆畫結尾追趕', '描边结束时补齐', 'Catch-up on Stroke End'), 'smoothing.catchUpOnEnd')); add(chk(L3('調整縮放', '调整缩放', 'Adjust for Zoom'), 'smoothing.adjustForZoom'));
-  } else if (id === 'texture' && mixerHand()){
-    // PS 2020 画笔设置 ▸ 纹理（只有混合器画笔接了：tools/mixer.js makeGrain）：图案、反相、缩放、亮度、对比度、为每个笔尖设置纹理、模式、深度
+  } else if (id === 'dualBrush' && !mixerHand()){
+    // PS 画笔设置 ▸ 双重画笔：模式、第二支笔尖（圆或取样）、大小、间距、散布（两轴）、数量、翻转（tools/brush.js dualBrushOf）
+    const DM = [['multiply', L3('色彩增值', '正片叠底', 'Multiply')], ['darken', L3('變暗', '变暗', 'Darken')], ['overlay', L3('覆蓋', '叠加', 'Overlay')], ['colorDodge', L3('加亮顏色', '颜色减淡', 'Color Dodge')],
+      ['colorBurn', L3('加深顏色', '颜色加深', 'Color Burn')], ['linearBurn', L3('線性加深', '线性加深', 'Linear Burn')], ['hardMix', L3('實色疊印混合', '实色混合', 'Hard Mix')], ['linearHeight', L3('線性高度', '线性高度', 'Linear Height')]];
+    const db = g.dualBrush || {};
+    add(row(L3('模式：', '模式：', 'Mode:'), selectOf(DM, db.mode || 'colorBurn', v => bset('dualBrush.mode', v), 'dualBrush.mode'), chk(L3('翻轉', '翻转', 'Flip'), 'dualBrush.flip')));
+    const tips = [['', T(L3('圓形筆尖', '圆形笔尖', 'Round tip'))]].concat(window.BrushTips ? BrushTips.list().map(t => [t.id, t.name]) : []);
+    add(row(L3('筆尖：', '笔尖：', 'Tip:'), selectOf(tips, db.tip || '', v => bset('dualBrush.tip', v), 'dualBrush.tip')));
+    add(num(L3('尺寸', '大小', 'Size'), 'dualBrush.size', 1, 1000, 'px'));
+    if (!db.tip) add(pct(L3('硬度', '硬度', 'Hardness'), 'dualBrush.hardness', 1));
+    add(pct(L3('間距', '间距', 'Spacing'), 'dualBrush.spacing', 10, 0.01));
+    add(pct(L3('散佈', '散布', 'Scatter'), 'dualBrush.scatter', 10)); add(chk(L3('兩軸', '两轴', 'Both Axes'), 'dualBrush.bothAxes'));
+    add(num(L3('計數', '数量', 'Count'), 'dualBrush.count', 1, 16, ''));
+  } else if (id === 'texture'){
+    // PS 2020 画笔设置 ▸ 纹理（画笔工具 tools/brush.js 与混合器画笔共用 tools/mixer.js makeGrain）：图案、反相、缩放、亮度、对比度、为每个笔尖设置纹理、模式、深度
     const pats = (window.PsEdit && PsEdit.patterns ? PsEdit.patterns.load() : []).map(q => [q.id, q.name]);
     const tx = g.texture || {};
     add(row(L3('圖樣：', '图案：', 'Pattern:'), selectOf(pats.length ? pats : [['', '—']], tx.pattern || (pats[0] ? pats[0][0] : ''), v => bset('texture.pattern', v), 'texture.pattern'), chk(L3('負片', '反相', 'Invert'), 'texture.invert')));
@@ -1916,7 +2037,8 @@ function brushSectionBody(b, g, i){
       ['linearHeight', L3('線性高度', '线性高度', 'Linear Height')], ['height', L3('高度', '高度', 'Height')]];
     add(row(L3('模式：', '模式：', 'Mode:'), selectOf(MODES, tx.mode || 'multiply', v => bset('texture.mode', v), 'texture.mode')));
     add(pct(L3('深度', '深度', 'Depth'), 'texture.depth', 1));
-  } else note(L3('未做：我們的筆刷引擎（tools/brush.js）沒有紋理／雙重筆刷／保護紋理（原碼 brush_sections.rs:422-514 有）。', '未做：我们的笔刷引擎（tools/brush.js）没有纹理／双重画笔／保护纹理（原码 brush_sections.rs:422-514 有）。', 'Not done: our brush engine (tools/brush.js) has no Texture / Dual Brush / Protect Texture (the original brush_sections.rs:422-514 has them).'));
+  } else if (id === 'dualBrush') note(L3('未做：混合器筆刷的引擎沒有雙重筆刷（筆刷工具有）。', '未做：混合器画笔的引擎没有双重画笔（画笔工具有）。', 'Not done: the Mixer Brush engine has no Dual Brush (the Brush tool has).'));
+  else note(L3('未做：我們的筆刷引擎（tools/brush.js）沒有保護紋理（原碼 brush_sections.rs:422-514 有）。', '未做：我们的笔刷引擎（tools/brush.js）没有保护纹理（原码 brush_sections.rs:422-514 有）。', 'Not done: our brush engine (tools/brush.js) has no Protect Texture (the original brush_sections.rs:422-514 has it).'));
 }
 /* ── 画笔预设（paint/src/presets.rs builtin：圆笔尖、不用纹理的那些照抄；取样笔尖／纹理的我们引擎画不出来，没抄） ── */
 const PR = c => ({control:c}), PRM = m => ({control:'penPressure', minimum:m}), SD = d => ({enabled:true, size:d}), TR = (o, f) => ({enabled:true, opacity:o, flow:f});
@@ -1941,9 +2063,21 @@ const UB_LS = 'dlPsBrushSettingsPresets.v1';
 const UserBrushes = PsWindow.userBrushes = {groups:null, get(){ if (!this.groups){ const v = LSget(UB_LS, null); this.groups = Array.isArray(v) ? v : []; } return this.groups; }, save(){ LSput(UB_LS, this.groups); }};
 const brushGroups = () => BRUSH_PRESETS.map(([g, items]) => ({name:g, builtin:true, items:items.map(([n, b]) => ({name:n, brush:b, builtin:true}))})).concat(UserBrushes.get().map(g => ({name:g.name, items:g.items})));
 const findBrush = name => { for (const g of brushGroups()) for (const it of g.items) if (it.name === name) return it; return null; };
-CMD.reg('ps.brush.presets.list', {i18n:'', params:'{} 画笔面板的预设 → {ok, groups:[{name, builtin?, presets:[{name, size}]}], sampled:[名字]（定义画笔预设存的取样笔尖；我们引擎画不了）}'}, () => ({ok:true,
-  groups:brushGroups().map(g => ({name:g.name, builtin:!!g.builtin, presets:g.items.map(it => ({name:it.name, size:Math.round((it.brush && it.brush.size) || 0)}))})),
-  sampled:(peek('ps.brush.presets') || []).map(x => typeof x === 'string' ? x : x.name)}));
+CMD.reg('ps.brush.presets.list', {i18n:'', params:'{} 画笔面板的预设 → {ok, groups:[{name, builtin?, presets:[{name, size}]}], sampled:[名字]（取样笔尖：内建、定义画笔预设、读入 .abr 的；换笔尖用 brush.tips.select）, tips:[{id,name,size,source}]}'}, () => {
+  const tips = window.BrushTips ? BrushTips.list() : [];
+  return {ok:true, groups:brushGroups().map(g => ({name:g.name, builtin:!!g.builtin, presets:g.items.map(it => ({name:it.name, size:Math.round((it.brush && it.brush.size) || 0)}))})),
+    sampled:tips.map(t => t.name), tips:tips.map(t => ({id:t.id, name:t.name, size:t.size, source:t.source}))};
+});
+/* 读入画笔（.abr）：挑档 → brush.tips.importAbr（base64） */
+function pickAbr(){
+  const inp = el('input', {type:'file', accept:'.abr', style:'display:none'});
+  inp.onchange = () => { const f = inp.files && inp.files[0]; if (!f) return;
+    f.arrayBuffer().then(buf => { const r = CMD.run('brush.tips.importAbr', {bytes:new Uint8Array(buf), name:f.name});
+      if (r && r.ok === false) alert(r.error);                 // 读不了的版本／坏档：照实说（parseAbr 的错误讯息）
+      else if (r && r.warning) alert(r.warning);
+      P.refresh('brushSettings'); }); inp.remove(); };
+  document.body.appendChild(inp); inp.click();
+}
 CMD.reg('ps.brush.presets.select', {i18n:'', params:'{preset} 画笔面板点一个预设：笔刷换成它（保留目前的平滑设定）→ {ok, brush}'}, p => {
   const it = findBrush(p.preset); if (!it) return fail(`no brush preset "${p.preset}"`);
   const cur = peek(BCMD('get')) || {}, patch = Object.assign({}, it.builtin ? BRUSH_BASE : {}, clone(it.brush)); patch.smoothing = cur.smoothing; delete patch.color; delete patch.seed;
@@ -1953,7 +2087,7 @@ CMD.reg('ps.brush.presets.select', {i18n:'', params:'{preset} 画笔面板点一
 CMD.reg('ps.brush.presets.save', {i18n:'', params:'{name?（缺省 "Brush N"）, group?="My Brushes", brush?（缺省＝目前笔刷）} 用这些设定新建画笔（brush.presets.save）→ {ok, name}'}, p => {
   const G = UserBrushes.get(), all = brushGroups().flatMap(g => g.items.map(i => i.name));
   let name = String(p.name || '').trim(); if (!name){ let n = 1; while (all.includes(`Brush ${n}`)) n++; name = `Brush ${n}`; } else name = uniqName(name, all);
-  const b = clone(p.brush || peek(BCMD('get')) || {}); ['ok', 'color', 'seed', 'erase', 'ignored', 'texture'].forEach(k => delete b[k]);
+  const b = clone(p.brush || peek(BCMD('get')) || {}); ['ok', 'color', 'seed', 'erase', 'ignored'].forEach(k => delete b[k]);
   const gn = String(p.group || 'My Brushes'); let g = G.find(x => x.name === gn); if (!g){ g = {name:gn, items:[]}; G.push(g); }
   g.items.push({name, brush:b}); UserBrushes.save(); BrushUI.preset = name; P.refresh('brushSettings'); return {ok:true, name, group:gn};
 });
@@ -1968,7 +2102,7 @@ function brushesTab(b){
   function drawList(){
     box.innerHTML = ''; const q = BrushUI.filter.trim().toLowerCase();
     const groups = brushGroups().map(g => Object.assign({}, g, {items:g.items.filter(it => !q || it.name.toLowerCase().includes(q))})).filter(g => g.items.length || !q);
-    const sampled = (peek('ps.brush.presets') || []).map(x => typeof x === 'string' ? {name:x} : x).filter(x => !q || x.name.toLowerCase().includes(q));
+    const sampled = (window.BrushTips ? BrushTips.list() : []).filter(x => !q || x.name.toLowerCase().includes(q));
     groups.forEach(g => {
       const key = 'brushes/' + g.name, open = !PU.toggled[key];
       const hd = el('div', {class:'li pgh', dataset:{group:g.name}, style:'font-size:11.5px', text:(open ? '▾ 📂 ' : '▸ 📁 ') + g.name, onclick:() => { if (PU.toggled[key]) delete PU.toggled[key]; else PU.toggled[key] = true; savePU(); drawList(); }});
@@ -1982,15 +2116,25 @@ function brushesTab(b){
         box.appendChild(r); });
     });
     if (sampled.length){
-      box.appendChild(el('div', {class:'li pgh', style:'font-size:11.5px;color:#777', text:'▾ 📁 ' + T(L3('取樣筆尖（定義筆刷預設集）', '取样笔尖（定义画笔预设）', 'Sampled tips (Define Brush Preset)'))}));
-      sampled.forEach(x => box.appendChild(el('div', {class:'li fut', dataset:{sampled:x.name}, style:'padding-left:16px;cursor:default', title:T(L3('未做：我們的筆刷引擎只有圓筆尖，還不收取樣筆尖', '未做：我们的笔刷引擎只有圆笔尖，还不收取样笔尖', 'Not done: our brush engine only has round tips, sampled tips are not supported yet')),
-        text:`${x.size || ''}  ${x.name}`})));
+      const cur = (peek(BCMD('get')) || {}).tip || '';
+      box.appendChild(el('div', {class:'li pgh', style:'font-size:11.5px', text:'▾ 📁 ' + T(L3('取樣筆尖', '取样笔尖', 'Sampled Tips'))}));
+      sampled.forEach(x => {
+        const th = BrushTips.thumb(x, 20); th.style.cssText = 'width:20px;height:20px;flex:0 0 20px;background:#1e1e1e;border-radius:2px';
+        const r = el('div', {class:'li' + (cur === x.id ? ' on' : ''), dataset:{sampled:x.name, tip:x.id}, style:'padding-left:16px', title:`${x.name} (${x.width}×${x.height})`,
+          onclick:() => { if (mixerHand()) return; runCmd('brush.tips.select', {tip:x.id}); BrushUI.preset = null; drawList(); }},
+          [th, el('span', {text:String(x.size || ''), class:'hint', style:'min-width:26px;margin:0;text-align:right'}), el('span', {text:x.name})]);
+        if (x.source !== 'builtin') r.oncontextmenu = e => { e.preventDefault(); ctxMenu(r, [
+          {label:L3('重新命名…', '重命名…', 'Rename…'), act:'rename', run:() => askName(L3('筆刷名稱', '画笔名称', 'Brush Name'), x.name, n => { CMD.run('brush.tips.edit', {action:'rename', tip:x.id, name:n}); drawList(); })},
+          {label:L3('刪除', '删除', 'Delete'), act:'delete', run:() => { runCmd('brush.tips.edit', {action:'delete', tip:x.id}); drawList(); }}]); };
+        box.appendChild(r);
+      });
     }
   }
   drawList();
   b.appendChild(el('div', {class:'bar'}, [btn('📁', L3('建立新群組', '创建新组', 'Create new group'), () => { const x = runCmd('ps.brush.presets.edit', {action:'newGroup', name:'Group'}); if (x && x.group) askName(L3('群組名稱', '组名称', 'Group Name'), x.group, n => CMD.run('ps.brush.presets.edit', {action:'renameGroup', group:x.group, name:n})); }, {dataset:{act:'newGroup'}}),
     btn('＋', L3('以這些設定建立新筆刷', '用这些设置创建新画笔', 'Create new brush from these settings'), () => { const x = runCmd('ps.brush.presets.save', {}); if (x && x.name) askName(L3('筆刷名稱', '画笔名称', 'Brush Name'), x.name, n => CMD.run('ps.brush.presets.edit', {action:'rename', preset:x.name, name:n})); }, {dataset:{act:'new'}}),
-    btn('🗑', L3('刪除筆刷', '删除画笔', 'Delete brush'), () => { if (BrushUI.preset) runCmd('ps.brush.presets.edit', {action:'delete', preset:BrushUI.preset}); }, {dataset:{act:'delete'}, disabled:!BrushUI.preset || !!(findBrush(BrushUI.preset) || {}).builtin})]));
+    btn('🗑', L3('刪除筆刷', '删除画笔', 'Delete brush'), () => { if (BrushUI.preset) runCmd('ps.brush.presets.edit', {action:'delete', preset:BrushUI.preset}); }, {dataset:{act:'delete'}, disabled:!BrushUI.preset || !!(findBrush(BrushUI.preset) || {}).builtin}),
+    btn('⇪', L3('讀入筆刷…（Photoshop .abr）', '导入画笔…（Photoshop .abr）', 'Import Brushes… (Photoshop .abr)'), () => pickAbr(), {dataset:{act:'importAbr'}})]));
 }
 P.define('brushSettings', {title:L3('筆刷設定', '画笔设置', 'Brush Settings'), w:520,
   refresh(b){
@@ -2022,7 +2166,7 @@ P.define('brushSettings', {title:L3('筆刷設定', '画笔设置', 'Brush Setti
       btn('⟲', L3('筆刷回到預設值', '画笔复位到默认值', 'Reset the brush to the defaults'), () => { const sm = (peek(BCMD('get')) || {}).smoothing; runCmd(BCMD('set'), {reset:true, brush:{smoothing:sm}}); }, {dataset:{act:'resetBrush'}})])]));
   }});
 /* brush.set 是工具状态命令（不经过 UI.refresh）⇒ 跑完补刷画笔设置面板 */
-if (!CMD.__psWinBrushRefresh){ CMD.__psWinBrushRefresh = true; const r0 = CMD.run; CMD.run = function(id){ const o = r0.apply(this, arguments); if (/^(brush\.set|mixer\.brush\.set|mixer\.setOptions|eraser\.setOptions)$/.test(id) && P.isOpen('brushSettings')) P.schedule('doc'); return o; }; }
+if (!CMD.__psWinBrushRefresh){ CMD.__psWinBrushRefresh = true; const r0 = CMD.run; CMD.run = function(id){ const o = r0.apply(this, arguments); if (/^(brush\.set|brush\.tips\.\w+|mixer\.brush\.set|mixer\.setOptions|eraser\.setOptions)$/.test(id) && P.isOpen('brushSettings')) P.schedule('doc'); return o; }; }
 
 /* ═══════════ 停靠块：图层（右侧面板）、工具（左侧工具栏）、选项（选项栏） ═══════════ */
 function dockShow(sel, on){ document.querySelectorAll(sel).forEach(n => { n.style.display = on ? '' : 'none'; }); }

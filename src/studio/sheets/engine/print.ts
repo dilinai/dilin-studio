@@ -20,7 +20,7 @@
 import { cellKey, colToIndex, indexToCol } from './formula'
 import { colWidthOf, rowHeightOf } from './layout'
 import { parseRange, type Rect } from './style'
-import { parseRect, filteredRows, type ViewContent } from './sheet-view'
+import { parseRect, hiddenRowSet, type ViewContent } from './sheet-view'
 
 // ── 型别与常数 ─────────────────────────────────────────────────────────────
 
@@ -242,7 +242,7 @@ function chunk(list: number[], size: (i: number) => number, titles: number[], ti
 /** 版面设定 ⇒ 每页印哪些列栏（纯函数·预览与真列印同一份） */
 export function planPrint(input: PlanInput): PrintPlan {
   const { content, setup, rect } = input
-  const hidden = input.hiddenRows ?? filteredRows(content)
+  const hidden = input.hiddenRows ?? hiddenRowSet(content)   // 手动藏的行＋筛掉的行都不印
   const colW = (c: number) => colWidthOf(content?.colWidths, c)
   const rowH = (r: number) => (hidden.has(r) ? 0 : rowHeightOf(content?.rowHeights, r))
   const paper = PAPER_CM[setup.paper] ?? PAPER_CM.A4

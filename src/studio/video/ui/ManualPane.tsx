@@ -34,7 +34,9 @@ export type ManualHost = { state: ManualTextState; onPatch: (p: TextPatch, commi
   /** 朗读：busy＝正在合成·msg＝上一次的结果（成功／失败原因）·onRun＝合成选中那段字（结果进素材区、放在那段字底下的音频轨） */
   tts?: (text: string) => ReactNode
   /** 运动跟踪＋四角透视（宿主画好·文字基础页底下） */
-  extra?: ReactNode }
+  extra?: ReactNode
+  /** 父层／3D／表达式（宿主画好·接在 extra 下面） */
+  rig?: ReactNode }
 /** 文字面板一颗菱形（管 props 那几项） */
 function TextKf({ host, props, testid }: { host: ManualHost; props: readonly KfProp[]; testid: string }) {
   const k = host.kf
@@ -152,6 +154,7 @@ function TextPanel({ ids, body, host, sub, setSub }: { ids: string[]; body: Text
       </div>
       {ids.length > 1 && <div className="px-2 py-1 rounded bg-cyan-900/30 text-[11px] text-cyan-200" data-testid="vedit-man-multi">{t('vedit_man_multi').replace(/\{n\}/g, String(ids.length))}</div>}
       {sub === 'basic' && ids.length === 1 && host.extra}
+      {sub === 'basic' && ids.length === 1 && host.rig}
       {sub === 'basic' ? <BasicPanel ids={ids} body={body} host={host} /> : sub === 'bubble' ? <BubblePanel body={body} host={host} /> : <FancyPanel body={body} host={host} />}
     </div>
   )

@@ -144,11 +144,18 @@ const Bucket = {
     const region = this.wandRegion(d, aw, ah, [sx - ax0, sy - ay0], o.tolerance, o.contiguous, o.antiAlias);
     if (!region) return false;
     // 只在填到的那块框里合成：覆盖度＝区域遮罩 × 不透明度 × 选区
-    const b = region.bbox, bw = b.x1 - b.x0, c = o.color, opacity = o.opacity, sel = o.selection;
+    const b = region.bbox, bw = b.x1 - b.x0, opacity = o.opacity, sel = o.selection, pat = o.pattern;
+    let c = o.color;
+    // 填充来源＝图案（paint_cmds.rs:43 Fill::Pattern）：图案以文件原点平铺（同 编辑 ▸ 填充 的图案），每格取那一点的图案颜色（straight RGBA）
+    const pc = pat ? [0, 0, 0, 0] : null, pmod = (v, n) => ((v % n) + n) % n;
     for (let y = b.y0; y < b.y1; y++){
       for (let x = b.x0; x < b.x1; x++){
         const m = region.mask[(y - b.y0) * bw + (x - b.x0)];
         if (!m) continue;
+        if (pat){
+          const j = (pmod(ay0 + y + oy, pat.height) * pat.width + pmod(ax0 + x + ox, pat.width)) * 4;
+          pc[0] = pat.px[j] / 255; pc[1] = pat.px[j + 1] / 255; pc[2] = pat.px[j + 2] / 255; pc[3] = pat.px[j + 3] / 255; c = pc;
+        }
         const k = (m / 255) * opacity * this.selCoverage(sel, ax0 + x + ox, ay0 + y + oy);
         if (k <= 0) continue;
         const i = (y * aw + x) * 4;
@@ -177,14 +184,21 @@ CMD.reg('bucket.fill', {
   i18n:'', undoable:true,
   params:'{x,y 文件坐标(px，会 floor), tolerance=32 (0..255，四通道各自差≤容差), contiguous=true (只填跟落点相连的), '
        + 'antiAlias=true (边缘 3×3 柔化一圈), color="#rrggbb[aa]"|[r,g,b,a](0..1)=前景色, opacity=100 (1..100 %), '
-       + 'contents="foreground" ("pattern" 尚未支持), layerId?} → {ok, filled} 只取当前层自己的像素判相近；有选区时只填选区内；'
+       + 'contents="foreground"|"pattern"（图案：以文件原点平铺）, pattern?=图案 id 或名字（contents="pattern" 时；缺省＝图案库第一个，见 ps.pattern.list）, layerId?} → {ok, filled, pattern?} 只取当前层自己的像素判相近；有选区时只填选区内；'
        + '照 PhotoCraft paint.bucket'
 }, p => {
   const L = p.layerId ? Doc.byId(p.layerId) : Doc.active();
   if (!L || L.kind !== 'raster') return {ok:false, error:'not a pixel layer'};
-  // 填充来源：前景色（预设）或图样（paint_cmds.rs:43）——我们还没有图样库
+  // 填充来源：前景色（预设）或图案（paint_cmds.rs:43）——图案库＝menus/impl/ps-edit.js 的 PsEdit.patterns（编辑 ▸ 定义图案／填充共用）
   const source = p.contents || p.source || 'foreground';
-  if (source === 'pattern') return {ok:false, error:'pattern fill not supported yet'};
+  if (source !== 'foreground' && source !== 'pattern') return {ok:false, error:`bucket.fill: contents must be "foreground" or "pattern", not ${JSON.stringify(source)}`};
+  let pat = null;
+  if (source === 'pattern'){
+    const lib = window.PsEdit && PsEdit.patterns;
+    if (!lib) return {ok:false, error:'bucket.fill: the pattern library is not loaded'};
+    pat = lib.resolve(typeof p.pattern === 'string' ? p.pattern : '');
+    if (!pat) return {ok:false, error:`bucket.fill: no pattern "${p.pattern || ''}" (see ps.pattern.list)`};
+  }
   const fg = Bucket.color(window.UI ? UI.fill() : '#000000', [0, 0, 0, 1]);
   const color = Bucket.color(p.color, fg);
   const num = (k, dv) => (p[k] === undefined || p[k] === null || isNaN(+p[k])) ? dv : +p[k];
@@ -195,21 +209,51 @@ CMD.reg('bucket.fill', {
     contiguous: bool('contiguous', true),
     antiAlias: bool('antiAlias', true),
     opacity: Math.max(0, Math.min(100, num('opacity', 100))) / 100,
-    color, selection: Doc.sel
+    color, selection: Doc.sel, pattern: pat
   });
-  return {ok:true, filled};
+  return pat ? {ok:true, filled, pattern:pat.id} : {ok:true, filled};
+});
+/* 选项栏「填充：前景／图案」与图案挑选（照 PS 油漆桶选项列；记在 ToolState，跟其它选项一样不进历史） */
+if (ToolState.bucketSource === undefined) ToolState.bucketSource = 'foreground';
+if (ToolState.bucketPattern === undefined) ToolState.bucketPattern = '';
+CMD.reg('bucket.options', {i18n:'', params:'{contents?:"foreground"|"pattern", pattern?:图案 id 或名字（""＝图案库第一个）, tolerance?:0..255, opacity?:1..100, antiAlias?:bool, contiguous?:bool} 油漆桶选项列 → 目前选项'}, p => {
+  if (p.contents !== undefined){ if (p.contents !== 'foreground' && p.contents !== 'pattern') return {ok:false, error:'bucket.options: contents must be "foreground" or "pattern"'}; ToolState.bucketSource = p.contents; }
+  if (p.pattern !== undefined){
+    const lib = window.PsEdit && PsEdit.patterns, q = lib && lib.resolve(String(p.pattern));
+    if (!q) return {ok:false, error:`bucket.options: no pattern "${p.pattern}"`};
+    ToolState.bucketPattern = q.id;
+  }
+  if (typeof p.tolerance === 'number' && isFinite(p.tolerance)) ToolState.tolerance = Math.max(0, Math.min(255, p.tolerance));
+  if (typeof p.opacity === 'number' && isFinite(p.opacity)) ToolState.fillOpacity = Math.max(1, Math.min(100, p.opacity));
+  if (typeof p.antiAlias === 'boolean') ToolState.antiAlias = p.antiAlias;
+  if (typeof p.contiguous === 'boolean') ToolState.contiguous = p.contiguous;
+  if (window.UI && ToolState.cur === 'bucket' && UI.buildOptions) UI.buildOptions('bucket');
+  return {ok:true, contents:ToolState.bucketSource, pattern:ToolState.bucketPattern, tolerance:ToolState.tolerance, opacity:ToolState.fillOpacity, antiAlias:ToolState.antiAlias, contiguous:ToolState.contiguous};
 });
 
 Tools.reg({
   id:'bucket', icon:'🪣', key:'G', group:'raster', order:30, for:'raster', needs:'raster', opts:[],
   hint:'ui.bucketHint',
   strings:{
-    'zh-Hant':{'opt.fillOpacity':'不透明', 'opt.antiAlias':'消除鋸齒', 'opt.contiguous':'連續的', 'ui.bucketHint':'點一下，填滿相近的顏色'},
-    'zh-Hans':{'opt.fillOpacity':'不透明度', 'opt.antiAlias':'消除锯齿', 'opt.contiguous':'连续的', 'ui.bucketHint':'点一下，填满相近的颜色'},
-    'en':{'opt.fillOpacity':'Opacity', 'opt.antiAlias':'Anti-alias', 'opt.contiguous':'Contiguous', 'ui.bucketHint':'Click to fill similar colours'}
+    'zh-Hant':{'opt.fillOpacity':'不透明', 'opt.antiAlias':'消除鋸齒', 'opt.contiguous':'連續的', 'ui.bucketHint':'點一下，填滿相近的顏色', 'opt.bucketSource':'填滿', 'opt.bucketPattern':'圖樣', 'ui.bucketFg':'前景', 'ui.bucketPat':'圖樣'},
+    'zh-Hans':{'opt.fillOpacity':'不透明度', 'opt.antiAlias':'消除锯齿', 'opt.contiguous':'连续的', 'ui.bucketHint':'点一下，填满相近的颜色', 'opt.bucketSource':'填充', 'opt.bucketPattern':'图案', 'ui.bucketFg':'前景', 'ui.bucketPat':'图案'},
+    'en':{'opt.fillOpacity':'Opacity', 'opt.antiAlias':'Anti-alias', 'opt.contiguous':'Contiguous', 'ui.bucketHint':'Click to fill similar colours', 'opt.bucketSource':'Fill', 'opt.bucketPattern':'Pattern', 'ui.bucketFg':'Foreground', 'ui.bucketPat':'Pattern'}
   },
   /* panels.rs:623-636 的顺序：不透明度、容差、消除锯齿、连续 */
   buildOptions(box, add, mk){
+    // panels.rs:623 填充来源（PS 选项列最前面：前景／图案＋图案挑选）
+    const src = document.createElement('select'); src.dataset.opt = 'bucketSource';
+    [['foreground', 'ui.bucketFg'], ['pattern', 'ui.bucketPat']].forEach(([v, k]) => { const o = document.createElement('option'); o.value = v; o.textContent = Lang.t(k); src.appendChild(o); });
+    src.value = ToolState.bucketSource; src.onchange = () => { CMD.run('bucket.options', {contents:src.value}); src.blur(); };
+    add('bucketSource', src);
+    const lib = window.PsEdit && PsEdit.patterns;
+    if (ToolState.bucketSource === 'pattern' && lib){
+      const ps = document.createElement('select'); ps.dataset.opt = 'bucketPattern';
+      lib.load().forEach(q => { const o = document.createElement('option'); o.value = q.id; o.textContent = q.name; ps.appendChild(o); });
+      const cur = lib.resolve(ToolState.bucketPattern); if (cur) ps.value = cur.id;
+      ps.onchange = () => { CMD.run('bucket.options', {pattern:ps.value}); ps.blur(); };
+      add('bucketPattern', ps);
+    }
     const op = mk('number', {min:1, max:100, value:ToolState.fillOpacity});
     op.dataset.opt = 'fillOpacity';
     op.oninput = () => { const v = +op.value; if (!isNaN(v) && op.value !== '') ToolState.fillOpacity = Math.max(1, Math.min(100, v)); };
@@ -233,7 +277,7 @@ Tools.reg({
     CMD.run('bucket.fill', {
       x:Math.floor(pt[0]), y:Math.floor(pt[1]),
       tolerance:ToolState.tolerance, contiguous:ToolState.contiguous, antiAlias:ToolState.antiAlias,
-      opacity:ToolState.fillOpacity, contents:'foreground', color:UI.fill()
+      opacity:ToolState.fillOpacity, contents:ToolState.bucketSource === 'pattern' ? 'pattern' : 'foreground', pattern:ToolState.bucketPattern || '', color:UI.fill()
     });
     P.down = false;
   }

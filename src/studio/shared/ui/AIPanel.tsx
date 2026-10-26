@@ -15,6 +15,8 @@
 //      不能挑资料夹的浏览器只说请换 Chrome、Edge。单机版不存浏览器、也不给「下載到電腦」。
 //      AI 已经经本机 MCP 在这页动手（agent-link agentLinkActive）⇒ 挡板收起，右栏那行「還沒選存放位置」照留。
 //   ④ 上面这组（短话、複製、两钮、注册）在栏内上下左右置中、四周留白（studio-ai-body：外层可捲、内层 my-auto 置中·内容比栏高时照常从顶捲）。
+//   ⑥ inlineBox（编辑器给了才有）：栏底一块输入框——Alt+A 把选中的内容做成小卡插进来、旁边「一鍵複製」连字带卡复制、下面一句说明（./InlineCardBox.tsx）。
+//      上下两段不互盖：上面清单区 flex-1 min-h-0 自己捲、输入框那块 flex-none 在底下占位；清单捲不完时输入框上缘一道阴影。
 //   页头照登入版对话框那一行（titleIcon＝收合钮、title、headerExtra）；底色同对话框（editorShell.chatSurface）。
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
@@ -29,6 +31,7 @@ import { buildAIPrompt, aiUsageKeys } from '../ai-prompt'
 import { aiPanelCopyText, GATE_PASS_SELECTOR, gatePassKey, openStudioRepo, studioNeg } from '../ai-panel.pure'
 import { editorShell } from '../theme/editor-shell-theme'
 import type { ChatSlotOptions } from '../page-host'
+import InlineCardBox, { copyText } from './InlineCardBox'
 
 export interface AIPanelProps extends ChatSlotOptions {
   appName: string
@@ -108,14 +111,6 @@ function PairBox({ pair }: { pair: SharePairCode }) {
       <p className="text-[12px] text-amber-700 tabular-nums" data-testid="studio-share-pair-countdown">{t('studio_share_pair_countdown', { time: fmtCountdown(left) })}</p>
     </div>
   )
-}
-
-async function copyText(text: string): Promise<void> {
-  try { await navigator.clipboard.writeText(text) } catch {
-    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select()
-    try { document.execCommand('copy') } catch { /* 连这条都不行就算了 */ }
-    ta.remove()
-  }
 }
 
 /** GitHub 官方猫标（Octicons mark-github）。 */
@@ -199,6 +194,19 @@ export default function AIPanel(p: AIPanelProps) {
   const [copied, setCopied] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
+  // 有底下输入框时：上面清单区捲不完（下面还有内容）⇒ 输入框上缘一道阴影，看得出是「往下捲」而不是被盖住
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const [below, setBelow] = useState(false)
+  const measureBelow = () => { const l = listRef.current; setBelow(!!l && l.scrollTop + l.clientHeight < l.scrollHeight - 1) }
+  useEffect(() => {
+    const l = listRef.current
+    if (!p.inlineBox || !l || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measureBelow)
+    ro.observe(l)
+    if (l.firstElementChild) ro.observe(l.firstElementChild)
+    measureBelow()
+    return () => ro.disconnect()
+  }, [p.inlineBox])
   const legacy = studioNeg('studio-ai-panel-lean')   // 负控：退回修前那一大段说明
   const share = shareEnabled() ? p.share ?? null : null
   const ss = useSyncExternalStore(share ? share.subscribe : noShareSub, share ? share.get : noShareGet, share ? share.get : noShareGet)
@@ -226,7 +234,7 @@ export default function AIPanel(p: AIPanelProps) {
         </div>
         {p.headerExtra && <div className="flex items-center gap-1.5 shrink-0">{p.headerExtra}</div>}
       </div>
-      <div className={`flex-1 min-h-0 overflow-y-auto flex flex-col text-sm ${pad}`}>
+      <div ref={listRef} onScroll={p.inlineBox ? measureBelow : undefined} className={`flex-1 min-h-0 overflow-y-auto flex flex-col text-sm ${pad}`} data-testid="studio-ai-list">
         <div className={`my-auto mx-auto w-full max-w-[340px] flex flex-col ${gap}`} data-testid="studio-ai-body">
         <section data-testid="studio-ai-url" className="flex flex-col gap-3">
           <p className="text-[13px] text-[#6E5B45] leading-relaxed text-center" data-testid="studio-ai-url-line">{t('studio_ai_url_line')}</p>
@@ -305,6 +313,13 @@ export default function AIPanel(p: AIPanelProps) {
         )}
         </div>
       </div>
+      {p.inlineBox && below && (
+        // 清单底边往上一段渐隐（零高占位·不吃版面）：捲不完时看得出「往下还有」
+        <div className="relative h-0 flex-none" aria-hidden>
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to bottom, transparent, ${editorShell.chatSurface.backgroundColor} 85%)` }} data-testid="studio-ai-list-fade" />
+        </div>
+      )}
+      {p.inlineBox && <InlineCardBox box={p.inlineBox} app={p.app} dense={p.dense} below={below} />}
     </div>
   )
 }

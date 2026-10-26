@@ -93,3 +93,11 @@ export function aiBriefHtml(repo) {
   out.push('</section>')
   return out.join('\n')
 }
+
+/** 把说明塞进 index.html 的 <div id="root"></div> 前面。⛔ 用 String.replace 的字串第二参：说明里的 $& $` $' 会被当取代符号（格式说明写到 "$<step>"，转义后就是 $&lt;），把 root 再塞一份进说明里，编辑器挂到看不见的那份上、整页空白。 */
+export function injectAiBrief(indexHtml, brief) {
+  const root = '<div id="root"></div>'
+  const i = indexHtml.indexOf(root)
+  if (i < 0) throw new Error('index.html 里找不到 <div id="root"></div>')
+  return indexHtml.slice(0, i) + brief + '\n' + indexHtml.slice(i)
+}

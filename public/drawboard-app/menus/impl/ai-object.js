@@ -7577,3 +7577,74 @@ window.addEventListener('keydown', e => {
   if (window.UI) UI.draw();
 }, true);
 })();
+
+/* ═════════════ 绘图模式（AI 工具列最下面那颗：正常绘图／背面绘图／内部绘图，Shift+D 轮换）═════════════
+   照 Illustrator：
+     背面绘图 ＝ 新画的物件放在选中物件的正下方；没选东西＝放在这层最底下。
+     内部绘图 ＝ 切进去的当下要选好一个物件（路径／复合路径／剪切组）；之后新画的物件都剪在它里面：
+               第一次把它做成剪切组 {type:'group', clip:true, drawInside:true, children:[剪切路径（它的拷贝·不上色·clipping）, 它本身, 新物件…]}，
+               之后接在那个组的最上面（剪切路径保留原物件外观＝原物件还在组里画着）。
+   新物件的落点由 engine.js addShape（形状／钢笔／铅笔／曲率笔…都经它）与斑点画笔叫 DrawMode.place 决定——跟着那条画图命令进同一步历史，Ctrl+Z 一次退回。
+   模式本身是工具状态（不进历史、不存档，跟 AI 一样）。 */
+(function(){
+'use strict';
+if (window.DrawMode) return;
+const clone = o => JSON.parse(JSON.stringify(o));
+const LEAF = ['rect', 'ellipse', 'star', 'polygon', 'path', 'line', 'bezier'];
+const MODES = ['normal', 'behind', 'inside'];
+const DM = window.DrawMode = {
+  mode:'normal', target:null,                            // target：{layerId, id（原物件）, group（做出来的剪切组 id）}
+  /* 内部绘图能拿来当容器的：单一路径、复合路径、剪切组 */
+  container(L, s){ return !!s && (LEAF.includes(s.type) || s.type === 'compound' || (s.type === 'group' && s.clip)); },
+  pickTarget(){
+    const L = Doc.active(); if (!L || L.kind !== 'vector' || !window.VecSel || VecSel.layerId !== L.id || VecSel.shapes.length !== 1) return null;
+    const s = L.data.shapes.find(x => x.id === VecSel.shapes[0]);
+    return this.container(L, s) ? {layerId:L.id, id:s.id, group:s.type === 'group' ? s.id : null} : null;
+  },
+  set(mode){
+    if (!MODES.includes(mode)) return {ok:false, error:`ai.drawMode.set: mode must be ${MODES.join(' | ')}`};
+    if (mode === 'inside'){
+      const t = this.pickTarget();
+      if (!t) return {ok:false, error:'ai.drawMode.set: Draw Inside needs exactly one selected path, compound path or clipping group'};
+      this.target = t;
+    } else this.target = null;
+    this.mode = mode;
+    return this.state();
+  },
+  state(){ return {ok:true, mode:this.mode, target:this.target ? Object.assign({}, this.target) : null}; },
+  /* 新物件 sh 刚 push 进 L.data.shapes 的尾端：照模式搬位置 */
+  place(L, sh){
+    if (this.mode === 'normal' || !L || L.kind !== 'vector') return;
+    const S = L.data.shapes, at = S.indexOf(sh); if (at < 0) return;
+    if (this.mode === 'behind'){
+      S.splice(at, 1);
+      const ids = window.VecSel && VecSel.layerId === L.id ? VecSel.shapes : [];
+      const idx = ids.map(id => S.findIndex(x => x.id === id)).filter(i => i >= 0);
+      S.splice(idx.length ? Math.min(...idx) : 0, 0, sh);   // 选中物件（最底下那个）的正下方；没选＝最底
+      return;
+    }
+    const t = this.target; if (!t || t.layerId !== L.id) return;
+    let g = t.group ? S.find(x => x.id === t.group && x.type === 'group' && x.clip) : null;
+    if (!g){
+      const i = S.findIndex(x => x.id === t.id); if (i < 0 || S[i] === sh) return;   // 容器不见了（undo、删掉）⇒ 照正常画
+      const host = S[i], cp = clone(host);
+      cp.id = uid('S'); Object.assign(cp, {fill:'none', stroke:'none', strokeWidth:0}); delete cp.effects;
+      if (LEAF.includes(cp.type)) cp.clipping = true;
+      g = {id:uid('S'), type:'group', clip:true, drawInside:true, children:[cp, host]};
+      S.splice(i, 1, g); t.group = g.id;
+    }
+    S.splice(S.indexOf(sh), 1);
+    g.children.push(sh);
+  }
+};
+CMD.reg('ai.drawMode.set', {i18n:'', params:'{mode:"normal"|"behind"|"inside"} 绘图模式（AI 工具列「正常绘图／背面绘图／内部绘图」）：behind＝新物件画在选中物件正下方（没选＝这层最底）；inside＝要先选一个路径／复合路径／剪切组，之后新物件都剪在它里面（第一次自动做成剪切组）。模式是工具状态、不进历史；画出来的物件跟画图命令同一步历史 → {ok, mode, target}'},
+  p => DM.set(p && p.mode));
+CMD.reg('ai.drawMode.cycle', {i18n:'', params:'{} Shift+D：正常 → 背面 → 内部 → 正常（内部绘图没有可用的选取就跳过）→ {ok, mode, target}'}, () => {
+  const order = MODES, i = order.indexOf(DM.mode);
+  for (let k = 1; k <= order.length; k++){ const r = DM.set(order[(i + k) % order.length]); if (r.ok !== false) return r; }
+  return DM.set('normal');
+});
+CMD.reg('ai.drawMode.get', {i18n:'', params:'{} → {ok, mode, target}'}, () => DM.state());
+/* 换文件／开档：回正常绘图（容器 id 在别的文件没意义） */
+if (window.Project && Project.load){ const load = Project.load; Project.load = function(){ DM.mode = 'normal'; DM.target = null; return load.apply(this, arguments); }; }
+})();

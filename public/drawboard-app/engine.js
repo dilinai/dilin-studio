@@ -1953,7 +1953,9 @@ function addShape(s){
   delete sh.layerId;
   // 🔴 命令收到的是文件坐标；矢量层被移动过（L.x/L.y）时要换算成图层坐标，跟像素层那条铁律一样
   shiftShape(sh, -L.x, -L.y);
-  sh.id = uid('S'); L.data.shapes.push(sh); Layer.invalidate(L);
+  sh.id = uid('S'); L.data.shapes.push(sh);
+  if (window.DrawMode) DrawMode.place(L, sh);          // AI 绘图模式（背面／内部，menus/impl/ai-object.js）：新物件改放到选中物件下面／剪进内部
+  Layer.invalidate(L);
   return {id:sh.id, layerId:L.id};
 }
 /* 把一个形状整体平移（各种 type 的几何栏位都要顾到） */

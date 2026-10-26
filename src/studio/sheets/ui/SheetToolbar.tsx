@@ -9,6 +9,7 @@
 //   ⛔ 最左「‹」收左栏那颗不在本组件里。
 //   边框钮改成 WPS 整套下拉＋其他边框对话框（SheetBorderMenu.tsx）；
 //     最左加「復原／重做」两颗图标钮（不可用时灰）＋⌄ 下拉列最近 20 步（点某一步＝一次撤到那里）。
+//   冻结筛选验证那组后面接资料两颗：移除重複・尋找與取代（放大镜·Ctrl／⌘+F 同）。
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSheetT } from './host'
 import { editorShell } from '../../shared/theme/editor-shell-theme'
@@ -42,6 +43,8 @@ export type ToolbarCommand =
   | { t: 'insertChart' }   // 图表
   | { t: 'condFormat'; action: CondUiAction }   // 条件格式
   | ViewCommand   // 冻结筛选验证：凍結／篩選／下拉選單
+  | { t: 'find'; mode: 'find' | 'replace' }   // 尋找與取代（小浮窗在 SheetFindDialog）
+  | { t: 'dedupe' }   // 移除重複（对话框在 SheetDedupeDialog）
 
 /** 网格回报给工具栏的当前选区状态（钮的按下态／合并钮字样由它定） */
 export type SelectionState = {
@@ -361,6 +364,14 @@ export default function SheetToolbar({ state, readonly, onCommand, history, hist
       <SheetCondFormatMenu rules={state.cond} disabled={dis} onAction={a => onCommand({ t: 'condFormat', action: a })} />
       {/* ── 冻结筛选验证：凍結窗格／篩選／下拉選單 ── */}
       <SheetViewToolbar view={state.view} disabled={dis} onCommand={onCommand} />
+      {/* ── 资料：移除重複／尋找與取代（尋找唯读也能用·取代钮在浮窗里另停用） ── */}
+      <Btn title={t('sheet_tb_dedupe_title')} testid="tb-dedupe" disabled={dis} onClick={() => onCommand({ t: 'dedupe' })}>
+        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5" /><path d="M3 9.5h18M3 15h9" /><path d="m15 13 5 5M20 13l-5 5" /></svg>
+        <span className="text-xs">{t('sheet_tb_dedupe')}</span>
+      </Btn>
+      <Btn title={t('sheet_tb_find')} testid="tb-find" onClick={() => onCommand({ t: 'find', mode: 'find' })}>
+        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="10.5" cy="10.5" r="6" /><path d="m15 15 5 5" /></svg>
+      </Btn>
       <Divider />
 
       {/* ── 插入圖片 ── */}

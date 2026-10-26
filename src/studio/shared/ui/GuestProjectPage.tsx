@@ -13,6 +13,7 @@ import { useStudioSession } from '../session'
 import { createGuestLive, makeGuestHost } from '../guest-host'
 import { isStandalone, shareEnabled } from '../host'
 import { startAgentLink } from '../agent-link'
+import { cliPageJob } from '../cli-page-job'
 import { createShareApi, type ShareApi } from '../share-api'
 import { localShareBook, type ShareBook } from '../share-book'
 import { createShareController, type ShareController } from '../share-sync'
@@ -53,6 +54,8 @@ export default function GuestProjectPage({ appDef, record, store: localStore, la
   const { t } = ss
   const ssRef = useRef(ss)
   ssRef.current = ss
+  const storeRef = useRef(store)
+  storeRef.current = store
   flushRef.current = () => ssRef.current.flush()
 
   // 轮询／心跳；关分页：已建立才提醒，pagehide 用 sendBeacon 打 close
@@ -70,10 +73,11 @@ export default function GuestProjectPage({ appDef, record, store: localStore, la
     }
   }, [share])
 
-  // 单机版本机 MCP：编辑器给了 agentJob（文件、表格、简报）⇒ 这页接活·交给外框 agentJob（先存、套用、写回、重载）
+  // 单机版本机 MCP：编辑器给了 agentJob（文件、表格、简报）⇒ 这页接活·交给外框 agentJob（先存、套用、写回、重载）；
+  //   命令列开的无头页另有 load／export 两种活（cli-page-job.ts）先接
   useEffect(() => {
     if (!isStandalone() || !appDef.agentJob) return
-    return startAgentLink({ editor: appDef.app, project: () => ({ id: record.id, title: ssRef.current.name || record.name }), handle: (job) => ssRef.current.agentJob(job) })
+    return startAgentLink({ editor: appDef.app, project: () => ({ id: record.id, title: ssRef.current.name || record.name }), handle: async (job) => (await cliPageJob({ appDef, store: storeRef.current, t: ssRef.current.t, flush: () => ssRef.current.flush(), reload: () => ssRef.current.reloadEditor() }, job)) ?? ssRef.current.agentJob(job) })
   }, [appDef, record.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [exportPick, setExportPick] = useState<Set<string> | null>(null)

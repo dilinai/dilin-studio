@@ -30,6 +30,9 @@ MenuTrees.add('ps', 'edit', {
     {n:{'zh-Hant':'填滿…', 'zh-Hans':'填充…', en:'Fill…'}, id:'edit.fill', key:'Shift+F5', impl:'ps.edit.fill.dialog'},
     {n:{'zh-Hant':'筆畫…', 'zh-Hans':'描边…', en:'Stroke…'}, id:'edit.stroke', impl:'ps.edit.stroke.dialog'},
     {n:{'zh-Hant':'內容感知填色…', 'zh-Hans':'内容识别填充…', en:'Content-Aware Fill…'}, id:'edit.contentAwareFill', impl:'ps.edit.contentAwareFill.dialog'},
+    // 生成式填充／移除：用网站生图服务（扣点·登入版才有；免登入／单机版点了出「需登入堤麟」）·menus/impl/genai.js
+    {n:{'zh-Hant':'生成式填色…', 'zh-Hans':'生成式填充…', en:'Generative Fill…'}, id:'edit.generativeFill', impl:'genai.fill.dialog'},
+    {n:{'zh-Hant':'生成式移除…', 'zh-Hans':'生成式移除…', en:'Generative Remove…'}, id:'edit.generativeRemove', impl:'genai.remove.dialog'},
     {sep:true},
     {n:{'zh-Hant':'內容感知比例', 'zh-Hans':'内容识别缩放', en:'Content-Aware Scale'}, id:'edit.contentAwareScale', key:'Ctrl+Alt+Shift+C', impl:'ps.edit.contentAwareScale.dialog'},
     {n:{'zh-Hant':'操控彎曲', 'zh-Hans':'操控变形', en:'Puppet Warp'}, id:'edit.puppetWarp', impl:'ps.edit.puppetWarp'},

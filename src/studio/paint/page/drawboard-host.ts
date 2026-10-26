@@ -1654,7 +1654,7 @@ export function installPageCommands(site: DlSite, h: PageCmdHooks): void {
 //   活从 lib/drawboard-relay 经 /api/drawboard/relay 取来（drawboard-relay-client.ts）；跑完的结果原路交回。
 //   单机版（游客整页·本机小服务 tools/serve.mjs 开的 MCP）也照这一支跑：活从 /_agent/poll 取来（shared/agent-link.ts）。
 //   命令照画板自己的 CMD.run 跑 ⇒ 被网站改过的（file.saveProject 存进云盘、file.exportPNG 导进云盘）照样是改过的那支；可撤销的照样进 Ctrl+Z。
-export type RelayJobIn = { id: string; target?: string | null; targetDoc?: number | null; kind: 'run' | 'list' | 'preview' | 'batch'; by?: string; byKey?: string; command?: string; params?: Params; filter?: string; maxSize?: number; steps?: { command: string; params?: Params }[] }
+export type RelayJobIn = { id: string; target?: string | null; targetDoc?: number | null; kind: 'run' | 'list' | 'preview' | 'batch'; by?: string; byKey?: string; imageDenied?: boolean; command?: string; params?: Params; filter?: string; maxSize?: number; steps?: { command: string; params?: Params }[] }
 
 /** 会换掉整份文件的命令（它自己就是要换档·⛔ 当成「中途被换」） */
 const switchesDoc = (command: string) => /^(ps\.|ai\.)?file\.(new|open)/.test(command) || /^ps\.document\.(new|open)$/.test(command)   // 含「打开为」ps.file.openAs、开新分页 ps.document.open（PSD／SVG／PDF／.ai 照分层开）
@@ -1702,6 +1702,13 @@ export type SiteSpec = {
 /** 参数不合规格（命令不存在、参数名不认得、型别／范围／选项不对）：没跑 */
 export class SpecError extends Error {}
 export async function runRelayJob(site: DlSite, job: RelayJobIn, cur?: () => string | null): Promise<RelayReplyOut> {
+  if (!job.imageDenied) return runRelayJobBody(site, job, cur)
+  // 1025（审 116180 F7）：网站说下活的身分没有生图权限 ⇒ 这件活跑的期间，画板扣点的生成命令（genai.js 进门同步判 __dlSite.genaiDenied）一律回 image_not_allowed
+  const gate = site as DlSite & { genaiDenied?: number }
+  gate.genaiDenied = (gate.genaiDenied ?? 0) + 1
+  try { return await runRelayJobBody(site, job, cur) } finally { gate.genaiDenied = Math.max(0, (gate.genaiDenied ?? 1) - 1) }
+}
+async function runRelayJobBody(site: DlSite, job: RelayJobIn, cur?: () => string | null): Promise<RelayReplyOut> {
   if (cur && job.target && cur() !== job.target) return { ok: false, error: 'drawboard_changed', message: `this tab now has drawboard ${cur() ?? '(unsaved)'} open, not ${job.target}` }
   // 排队时开着的是没存过的新档 ⇒ 绑的是它的文件序号；跑之前序号变了（使用者开了别份）⇒ 不跑（⛔ 写进／存进别份）
   if (typeof job.targetDoc === 'number' && site.Doc?.serial !== job.targetDoc) return { ok: false, error: 'drawboard_changed', message: `the unsaved drawboard that was open when this was queued has been replaced (this tab now has ${cur?.() ?? '(unsaved)'} open); nothing was run` }

@@ -163,6 +163,8 @@ MenuTrees.add('ai', 'object', {
       {n:{'zh-Hant':'釋放', 'zh-Hans':'释放', en:'Release'}, id:'imageTrace.release', impl:'ai.imageTrace.release'},
       {n:{'zh-Hant':'展開', 'zh-Hans':'扩展', en:'Expand'}, id:'imageTrace.expand', impl:'ai.imageTrace.expand'},
     ]},
+    // 文字转矢量：生图（扣点·登入版才有）后用上面的图像描摹描成新矢量层·menus/impl/genai.js
+    {n:{'zh-Hant':'文字轉向量圖形…', 'zh-Hans':'文字转矢量图形…', en:'Text to Vector Graphic…'}, id:'object.textToVector', impl:'genai.textToVector.dialog'},
     {n:{'zh-Hant':'繞圖排文', 'zh-Hans':'文本绕排', en:'Text Wrap'}, sub:[
       {n:{'zh-Hant':'製作', 'zh-Hans':'建立', en:'Make'}, id:'object.textWrap.make', impl:'ai.object.textWrap.make'},
       {n:{'zh-Hant':'釋放', 'zh-Hans':'释放', en:'Release'}, id:'object.textWrap.release', impl:'ai.object.textWrap.release'},

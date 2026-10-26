@@ -9,7 +9,8 @@ import { fxStateAt, type FxPass, type TransPass } from './fx.pure'
 import { filterOverLayer } from './filter.pure'
 import type { FilterParams } from './filters.data'
 import { programTime } from './program.pure'
-import { maskMatteNegOff, matteLaneOf, matteLanesAt, type MatteMode } from './mask-matte.pure' // 轨道遮罩
+import { maskMatteNegOff, matteClipAt, matteLaneOf, matteLanesAt, type MatteMode } from './mask-matte.pure' // 轨道遮罩
+import { COMP_DEPTH_MAX, compDuration, compNegOff, type Comps, type VeditComp } from './comp.pure' // 巢状合成
 import { layersAt, timelineEnd, type LayerState, type MediaKindLike, type StickerBody, type TextBody, type TlClip, type Tracks } from './timeline.pure'
 
 export const EXPORT_FPS = 30
@@ -60,18 +61,22 @@ export const frameTime = (r: Pick<ExportRange, 'from'>, i: number, fps = EXPORT_
 /** media：影片／图片（source＝素材第几秒）·fx＝特效转场（fxStateAt·没有 ⇒ null）·filter＝套在它上面的滤镜；
  *  text／sticker：照片段内容画；program：程序片段（t＝叫 render 的秒·params＝本段参数·包的默认值由画的那头补） */
 export type FilterOp = { id: string; params: FilterParams; strength: number }
-export type TransOp = TransPass & { otherMedia: string; otherKind: 'video' | 'image' }
-export type DrawOp =
-  | { kind: 'media'; laneId: string; clip: TlClip; mediaId: string; media: 'video' | 'image'; source: number; effects: FxPass[]; trans: TransOp | null; filter: FilterOp | null
+/** otherKind 'comp'＝转场另一边是合成段（otherComp＝哪份·otherMedia 空） */
+export type TransOp = TransPass & { otherMedia: string; otherKind: 'video' | 'image' | 'comp'; otherComp?: string }
+/** media 'comp'＝合成段：comp＝哪份子合成·source＝画合成里第几秒（null＝出了合成长度·这一刻透明）·mediaId 空 */
+export type MediaOp = { kind: 'media'; laneId: string; clip: TlClip; mediaId: string; media: 'video' | 'image' | 'comp'; comp?: string; source: number; effects: FxPass[]; trans: TransOp | null; filter: FilterOp | null
     /** 盖在上面的调节层（由近到远） */ adjust: Grade[]
-    /** 轨道遮罩：那条文字／贴纸轨这一刻要画的东西（画进遮罩画布·matteAlpha 转成遮罩）·没挂 ⇒ 缺 */ matte?: MatteOp }
+    /** 轨道遮罩：遮罩轨这一刻要画的东西（画进遮罩画布·matteAlpha 转成遮罩）·没挂 ⇒ 缺 */ matte?: MatteOp }
+export type DrawOp =
+  | MediaOp
   | { kind: 'text'; laneId: string; clip: TlClip; body: TextBody; at: { t: number; length: number; offset: number } }
   | { kind: 'sticker'; laneId: string; clip: TlClip; body: StickerBody }
   | { kind: 'vector'; laneId: string; clip: TlClip } // 形状／纯色片段（画法＝shape.pure drawVectorClip·同预览）
   | { kind: 'program'; laneId: string; clip: TlClip; pkg: string; t: number; params: Record<string, string | number | boolean> }
 
-/** 轨道遮罩：遮罩轨这一刻的画法（ops 空＝那条此刻没东西 ⇒ 全挡） */
-export type MatteOp = { laneId: string; mode: MatteMode; invert: boolean; ops: Array<Extract<DrawOp, { kind: 'text' | 'sticker' }>> }
+/** 轨道遮罩：遮罩轨这一刻的画法（ops 空＝那条此刻没东西 ⇒ 全挡·反相则全露）；
+ *  文字／贴纸 ⇒ ui/matte-draw drawMatteOps 画；画面层（影片／图片／形状／合成段·不带它自己的遮罩）⇒ 汇出那支照画面层画进遮罩画布 */
+export type MatteOp = { laneId: string; mode: MatteMode; invert: boolean; ops: Array<Extract<DrawOp, { kind: 'text' | 'sticker' | 'vector' | 'media' }>> }
 const tsOpOf = (s: LayerState, t: number): Extract<DrawOp, { kind: 'text' | 'sticker' }> | null => {
   const c = s.hit?.clip
   if (!s.show || !c) return null
@@ -79,21 +84,50 @@ const tsOpOf = (s: LayerState, t: number): Extract<DrawOp, { kind: 'text' | 'sti
   if (s.lane.kind === 'sticker' && c.sticker) return { kind: 'sticker', laneId: s.lane.id, clip: c, body: c.sticker }
   return null
 }
-/** 轨道遮罩：画面片段 c（在 laneId）这一刻的遮罩画法（预览与汇出同一份）；没挂或找不到遮罩轨 ⇒ undefined；药 ⇒ undefined */
-export function matteOpOf(tr: Tracks, t: number, laneId: string, c: TlClip): MatteOp | undefined {
+type KindOf = (mediaId: string) => MediaKindLike | undefined
+/** 画面轨这一层这一刻的画法（影片／图片／合成段 ⇒ media·形状纯色动态背景 ⇒ vector·别的 ⇒ null）；遮罩另由调用方挂 */
+function visualOpOf(layers: LayerState[], s: LayerState, t: number, kindOf: KindOf, only: ReadonlySet<string> | undefined, comps: Comps | undefined): Extract<DrawOp, { kind: 'vector' | 'media' }> | null {
+  const c = s.hit?.clip
+  if (!c || s.lane.kind !== 'visual') return null
+  const laneId = s.lane.id
+  if (c.rig) return null // 空物件／摄影机／灯光：自己不画（rig.pure）
+  if (c.shape || c.solid || c.bgfx) return { kind: 'vector', laneId, clip: c }
+  const comp = c.comp && !compNegOff() ? comps?.[c.comp] : undefined
+  const k = comp ? 'comp' : c.mediaId ? kindOf(c.mediaId) : undefined
+  if (k !== 'video' && k !== 'image' && k !== 'comp') return null
+  const st = fxStateAt(s.lane, t)
+  let trans: TransOp | null = null
+  if (st?.trans?.head) trans = { ...st.trans, otherMedia: '', otherKind: 'image' } // 片头转场：另一边＝黑场（不取素材）
+  else if (st?.trans && (!only || only.has(st.trans.other.clip.id))) {
+    const oc = st.trans.other.clip
+    if (oc.comp && comps?.[oc.comp] && !compNegOff()) trans = { ...st.trans, otherMedia: '', otherKind: 'comp', otherComp: oc.comp }
+    else { const ok = kindOf(oc.mediaId); if (ok === 'video' || ok === 'image') trans = { ...st.trans, otherMedia: oc.mediaId, otherKind: ok } }
+  }
+  const f = filterOverLayer(layers, laneId)
+  return { kind: 'media', laneId, clip: c, mediaId: c.mediaId, media: k, ...(comp ? { comp: c.comp } : {}), source: k === 'image' ? 0 : s.hit!.local, effects: st?.effects ?? [], trans, filter: f ? { id: f.item.id, params: f.item.params, strength: f.strength } : null, adjust: adjustLayersOver(layers, laneId, t) }
+}
+/** 轨道遮罩：画面片段 c（在 laneId）这一刻的遮罩画法（预览与汇出同一份）；没挂或找不到遮罩轨 ⇒ undefined；药 ⇒ undefined。
+ *  kindOf 不给 ⇒ 画面轨当遮罩的那层不出（预览文字／贴纸遮罩那条只要形状图） */
+export function matteOpOf(tr: Tracks, t: number, laneId: string, c: TlClip, kindOf?: KindOf, comps?: Comps): MatteOp | undefined {
   const m = c.look?.matte
   if (!m || maskMatteNegOff()) return undefined
   const mlId = matteLaneOf(tr, laneId, m)
   if (!mlId) return undefined
-  const ml = layersAt(tr, t).find((x) => x.lane.id === mlId)
-  const mo = ml ? tsOpOf(ml, t) : null
+  const layers = layersAt(tr, t)
+  const ml = layers.find((x) => x.lane.id === mlId)
+  const hit = matteClipAt(tr, mlId, m, t)
+  let mo: MatteOp['ops'][number] | null = null
+  if (ml && hit && ml.show) {
+    if (ml.lane.kind === 'visual') { const v = kindOf ? visualOpOf(layers, ml, t, kindOf, undefined, comps) : null; mo = v ? (v.kind === 'media' ? { ...v, trans: null } : v) : null }
+    else mo = tsOpOf(ml, t)
+  }
   return { laneId: mlId, mode: m.mode, invert: !!m.invert, ops: mo ? [mo] : [] }
 }
-/** 时间轴 t 这一刻由下往上要画的每一层（音频轨、滤镜轨本身不画）；only 给了 ⇒ 只画那几段（滤镜也只认那几段里的） */
-export function framePlan(tr: Tracks, t: number, kindOf: (mediaId: string) => MediaKindLike | undefined, only?: ReadonlySet<string>): DrawOp[] {
+/** 时间轴 t 这一刻由下往上要画的每一层（音频轨、滤镜轨本身不画）；only 给了 ⇒ 只画那几段（滤镜也只认那几段里的）；comps＝子合成（合成段要它） */
+export function framePlan(tr: Tracks, t: number, kindOf: KindOf, only?: ReadonlySet<string>, comps?: Comps): DrawOp[] {
   const layers = layersAt(tr, t).map((s) => (only && s.hit && !only.has(s.hit.clip.id) ? { ...s, hit: null, show: false } : s))
   const out: DrawOp[] = []
-  // 轨道遮罩：被拿来当遮罩的文字／贴纸轨本身不画（matteLanesAt·预览同一份）·它的画法挂到用它的画面片段上
+  // 轨道遮罩：被拿来当遮罩的轨本身不画（matteLanesAt·预览同一份）·它的画法挂到用它的画面片段上
   const mattes = matteLanesAt(tr, t)
   const tsOp = (s: LayerState) => tsOpOf(s, t)
   for (let i = layers.length - 1; i >= 0; i--) {
@@ -101,25 +135,21 @@ export function framePlan(tr: Tracks, t: number, kindOf: (mediaId: string) => Me
     if (!s.show || !s.hit) continue
     const c = s.hit.clip
     const laneId = s.lane.id
-    if (s.lane.kind === 'text' || s.lane.kind === 'sticker') { if (!mattes.has(laneId)) { const o = tsOp(s); if (o) out.push(o) } continue }
+    if (mattes.has(laneId)) continue
+    if (s.lane.kind === 'text' || s.lane.kind === 'sticker') { const o = tsOp(s); if (o) out.push(o); continue }
     if (s.lane.kind === 'program') { if (c.program) out.push({ kind: 'program', laneId, clip: c, pkg: c.program.pkg, t: programTime(c, s.hit.local), params: c.program.params }); continue }
-    if (s.lane.kind === 'visual' && (c.shape || c.solid || c.bgfx)) { out.push({ kind: 'vector', laneId, clip: c }); continue }
-    if (s.lane.kind !== 'visual' || !c.mediaId) continue
-    const k = kindOf(c.mediaId)
-    if (k !== 'video' && k !== 'image') continue
-    const st = fxStateAt(s.lane, t)
-    let trans: TransOp | null = null
-    if (st?.trans?.head) trans = { ...st.trans, otherMedia: '', otherKind: 'image' } // 片头转场：另一边＝黑场（不取素材）
-    else if (st?.trans && (!only || only.has(st.trans.other.clip.id))) {
-      const ok = kindOf(st.trans.other.clip.mediaId)
-      if (ok === 'video' || ok === 'image') trans = { ...st.trans, otherMedia: st.trans.other.clip.mediaId, otherKind: ok }
-    }
-    const f = filterOverLayer(layers, laneId)
-    const matte = [...mattes.values()].includes(laneId) ? matteOpOf(tr, t, laneId, c) : undefined
-    out.push({ kind: 'media', laneId, clip: c, mediaId: c.mediaId, media: k, source: k === 'image' ? 0 : s.hit.local, effects: st?.effects ?? [], trans, filter: f ? { id: f.item.id, params: f.item.params, strength: f.strength } : null, adjust: adjustLayersOver(layers, laneId, t), ...(matte ? { matte } : {}) })
+    const v = visualOpOf(layers, s, t, kindOf, only, comps)
+    if (!v) continue
+    if (v.kind === 'vector') { out.push(v); continue }
+    const matte = c.look?.matte ? matteOpOf(tr, t, laneId, c, kindOf, comps) : undefined
+    out.push({ ...v, ...(matte ? { matte } : {}) })
   }
   return out
 }
+/** 合成段画合成里第几秒：media 'comp' 的 source 就是（srcAt）·出了合成长度 ⇒ 这一刻合成里没东西（透明） */
+export const compShows = (op: Pick<MediaOp, 'source'>, comp: Pick<VeditComp, 'length' | 'tracks'>): boolean => op.source >= -1e-6 && op.source < compDuration(comp) - 1e-6
+/** 转场另一边是合成段：取合成里第几秒（夹进 [0, 合成长−0.04]·同影片 otherTime） */
+export const compOtherTime = (source: number, comp: Pick<VeditComp, 'length' | 'tracks'>): number => Math.min(Math.max(0, source), Math.max(0, compDuration(comp) - 0.04))
 
 /** 素材在成片里放哪（照比例放进整个画面·置中·放不满补黑边·同预览 max-w-full max-h-full／object-contain） */
 export function containRect(W: number, H: number, sw: number, sh: number): { x: number; y: number; w: number; h: number } {
@@ -247,7 +277,7 @@ export function audioBlockerList(bs: ReadonlyArray<AudioBlocker>): string {
  * 成片里要画的影片／图片各在成品第几秒被用到（照 framePlan 同一套判法逐格取样·另在每段开头补一点免得短于取样间隔的漏掉）。
  * 回 mediaId ⇒ 成品秒数时段（已扣 range.from·相邻取样并成一段）。汇出前逐份打开·打不开 ⇒ visualBlockers 挡下。 */
 export const VISUAL_SAMPLE_STEP = 0.25
-export function visualUses(tr: Tracks, range: ExportRange, kindOf: (mediaId: string) => MediaKindLike | undefined, step = VISUAL_SAMPLE_STEP): Map<string, Array<[number, number]>> {
+export function visualUses(tr: Tracks, range: ExportRange, kindOf: (mediaId: string) => MediaKindLike | undefined, step = VISUAL_SAMPLE_STEP, comps?: Comps): Map<string, Array<[number, number]>> {
   const ts = new Set<number>()
   for (let t = range.from; t < range.to; t += step) ts.add(Math.round(t * 1000) / 1000)
   for (const l of tr) for (const c of l.clips) {
@@ -263,11 +293,21 @@ export function visualUses(tr: Tracks, range: ExportRange, kindOf: (mediaId: str
     if (last && a <= last[1] + 1e-6) last[1] = Math.max(last[1], b); else sp.push([a, b])
     out.set(id, sp)
   }
-  for (const t of times) for (const op of framePlan(tr, t, kindOf, range.only)) {
-    if (op.kind !== 'media') continue
-    add(op.mediaId, t)
-    if (op.trans && !op.trans.head) add(op.trans.otherMedia, t)
+  // 合成段（含遮罩层、转场另一边）：往下照合成里那一刻再取（递归·同汇出那支画到的素材）
+  const walk = (ops: DrawOp[], t: number, depth: number) => {
+    for (const op0 of ops) for (const op of [op0, ...(op0.kind === 'media' && op0.matte ? op0.matte.ops : [])]) {
+      if (op.kind !== 'media') continue
+      if (op.media === 'comp') {
+        const comp = comps?.[op.comp!]
+        if (comp && op.source < compDuration(comp) - 1e-6 && depth < COMP_DEPTH_MAX) walk(framePlan(comp.tracks, op.source, kindOf, undefined, comps), t, depth + 1)
+      } else add(op.mediaId, t)
+      if (op.trans && !op.trans.head) {
+        if (op.trans.otherKind === 'comp') { const oc = comps?.[op.trans.otherComp!]; if (oc && depth < COMP_DEPTH_MAX) walk(framePlan(oc.tracks, compOtherTime(op.trans.other.source, oc), kindOf, undefined, comps), t, depth + 1) }
+        else add(op.trans.otherMedia, t)
+      }
+    }
   }
+  for (const t of times) walk(framePlan(tr, t, kindOf, range.only, comps), t, 0)
   return out
 }
 /** 打不开的画面素材 ⇒ 要挡下的清单（同 AudioBlocker 形状·清单白话用 audioBlockerList） */

@@ -39,6 +39,7 @@ npm start        # 等於 node tools/serve.mjs，打開 http://localhost:41730
 - `npm run build` 能過。
 - 用改到的編輯器實際開一份工程、存檔、重新整理後確認內容還在。
 - 改到剪輯的工程檔讀寫時，跑 `node tools/video-cli.mjs check <工程資料夾>`，確認沒有被丟掉或改掉的項目。
+- 改到文件、簡報的工程檔讀寫時，跑 `node tools/docs-cli.mjs check <工程資料夾>`、`node tools/slides-cli.mjs check <工程資料夾>`；改到匯出時跑一次 `export`（`docx`／`pdf`／`pptx` 要這台有 Chrome、Edge 或 Chromium）。
 - 改到畫板命令時，跑 `node tools/paint-cli.mjs run --steps <steps.json> --out <輸出檔>` 確認命令照預期執行。
 
 `src/studio/**/*.test.ts` 等測試檔跟上游同一份，有些要上游倉的環境才跑得起來；維護者移回上游時會跑完整測試。

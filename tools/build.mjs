@@ -8,7 +8,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
-import { aiBriefHtml } from './ai-brief.mjs'
+import { aiBriefHtml, injectAiBrief } from './ai-brief.mjs'
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const APP = join(REPO, 'app')
@@ -56,11 +56,12 @@ const result = await esbuild.build({
 })
 if (!existsSync(join(APP, 'app.css'))) writeFileSync(join(APP, 'app.css'), '')
 
-// 剪辑命令列版的核心（tools/video-cli.mjs import 它）：读档检查、命令表、FCPXML／剪映汇出都是纯函数 ⇒ 打成 node 跑的一支
-await esbuild.build({
-  entryPoints: [join(REPO, 'src', 'studio', 'video', 'cli-core.ts')],
+// 命令列版的核心（tools/<编辑器>-cli.mjs import 它）：读档检查、命令表、跑命令、纯算得出的汇出都是纯函数 ⇒ 各打成 node 跑的一支
+//   剪辑（FCPXML／剪映…）、文件（改正文、Markdown）、简报（元件／页操作）
+for (const ed of ['video', 'docs', 'slides']) await esbuild.build({
+  entryPoints: [join(REPO, 'src', 'studio', ed, 'cli-core.ts')],
   bundle: true,
-  outfile: join(APP, 'video-cli-core.mjs'),
+  outfile: join(APP, `${ed}-cli-core.mjs`),
   format: 'esm',
   platform: 'node',
   target: ['node18'],
@@ -73,6 +74,25 @@ await esbuild.build({
   logLevel: 'warning',
 })
 
+// 表格命令列版的核心（tools/sheets-cli.mjs import 它）：读档检查、读格算公式、表格操作、xlsx／csv 读写都是纯函数 ⇒ 同样打成 node 跑的一支（SheetJS 一起打进去）
+await esbuild.build({
+  entryPoints: [join(REPO, 'src', 'studio', 'sheets', 'cli-core.ts')],
+  bundle: true,
+  outfile: join(APP, 'sheets-cli-core.mjs'),
+  format: 'esm',
+  platform: 'node',
+  target: ['node18'],
+  minify: true,
+  charset: 'utf8',
+  nodePaths,
+  tsconfig: join(REPO, 'tsconfig.json'),
+  define: { 'process.env.NEXT_PUBLIC_STUDIO_STANDALONE': '"1"', 'process.env.NEXT_PUBLIC_DEPLOYMENT_REGION': JSON.stringify(manifest.region) },
+  // SheetJS 在 node 里会 require('stream')、require('fs') ⇒ esm 包里先备一个 require
+  banner: { js: "import{createRequire as __dilinReq}from'node:module';const require=__dilinReq(import.meta.url);" },
+  loader: { '.woff': 'empty', '.woff2': 'empty', '.ttf': 'empty', '.png': 'empty', '.jpg': 'empty', '.gif': 'empty', '.svg': 'empty', '.css': 'empty' },
+  logLevel: 'warning',
+})
+
 const tw = tailwindcss({ content: [join(REPO, 'src', '**', '*.{ts,tsx,html}')], theme: { extend: {} }, plugins: [] })
 const cssIn = readFileSync(join(REPO, 'src', 'shell', 'site.css'), 'utf8')
 const css = await postcss([tw, autoprefixer]).process(cssIn, { from: join(REPO, 'src', 'shell', 'site.css'), to: join(APP, 'site.css') })
@@ -80,7 +100,7 @@ writeFileSync(join(APP, 'site.css'), css.css)
 
 cpSync(join(REPO, 'public'), APP, { recursive: true })
 // index.html 塞进给 AI 读的说明（见 ai-brief.mjs）：AI 抓这页网址就读得到怎么改、格式长什么样
-writeFileSync(join(APP, 'index.html'), readFileSync(join(REPO, 'src', 'shell', 'index.html'), 'utf8').replace('<div id="root"></div>', aiBriefHtml(REPO) + '\n<div id="root"></div>'))
+writeFileSync(join(APP, 'index.html'), injectAiBrief(readFileSync(join(REPO, 'src', 'shell', 'index.html'), 'utf8'), aiBriefHtml(REPO)))
 writeFileSync(join(APP, 'version.json'), JSON.stringify({ name: manifest.name, version: manifest.version, versions: manifest.versions, sourceCommit: manifest.sourceCommit }, null, 2) + '\n')
 
 const kb = n => `${Math.round(n / 1024)} KB`

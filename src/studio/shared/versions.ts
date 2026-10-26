@@ -8,10 +8,10 @@
 import type { StudioAppId } from './types'
 
 export const STUDIO_VERSIONS: Readonly<Record<StudioAppId | 'base', string>> = Object.freeze({
-  base: '1.3.33',
-  docs: '1.3.28',
-  sheets: '1.4.5',
-  slides: '1.3.27',
-  video: '1.3.34',
-  paint: '1.3.41',
+  base: '1.3.35',
+  docs: '1.3.29',
+  sheets: '1.4.8',
+  slides: '1.3.28',
+  video: '1.3.40',
+  paint: '1.3.49',
 })

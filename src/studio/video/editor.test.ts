@@ -38,8 +38,8 @@ export function netViolations(name: string, s: string): string[] {
   return out
 }
 
-/** 游客版宿主里要后端的那几组：都得是 null（或回 null 的函数） */
-const BACKEND_NULL = ['drive', 'shell', 'tts', 'chat', 'startRelay', 'offload', 'renderProjectsDialog', 'renderHistoryDialog', 'renderDriveEye', 'head', 'create'] as const
+/** 游客版宿主里要后端的那几组：都得是 null（或回 null 的函数）。chat（Alt+A 加進對話）不算：游客版插进右栏底下的输入框（不碰后端·见 E） */
+const BACKEND_NULL = ['drive', 'shell', 'tts', 'startRelay', 'offload', 'renderProjectsDialog', 'renderHistoryDialog', 'renderDriveEye', 'head', 'create'] as const
 export function guestBackendLeaks(s: string): string[] {
   const c = code(s)
   const out: string[] = []
@@ -96,6 +96,12 @@ test('E 游客版宿主：要后端的几组都给 null·白名单闸不走·功
   const G = src('page/guest.tsx')
   assert.deepEqual(guestBackendLeaks(G), [])
   assert.match(G, /checkGate: \(\) => Promise\.resolve\(true\)/)
+  // Alt+A 加進對話：插进右栏底下的输入框（宿主给 inlineBox）·记号同登入版那几支·不选角色（adopt 不做事）
+  assert.match(G, /chat: o\.chat \?\? null,/)
+  assert.match(G, /insert: \(token\) => box\.insert\(token\),/)
+  assert.match(G, /clipsToken: \(tr, ids, nameOf\) => clipsTokenOf\(tr, ids, nameOf, lang\(\)\),/)
+  assert.match(G, /adopt: \(\) => \{\},/)
+  assert.match(G, /renderChatSlot: \(o\) => live\.current\.host\.renderChatSlot\(\{ \.\.\.o, inlineBox: box \}\),/)
   assert.match(G, /export const VIDEO_GUEST_FEATURES: Readonly<Record<string, boolean>> = \{ \[VEDIT_FEATURES\.licenses\]: true \}/)
   // 药
   assert.deepEqual(guestBackendLeaks(G.replace('drive: null,', 'drive: siteDrive,')), ['drive'])

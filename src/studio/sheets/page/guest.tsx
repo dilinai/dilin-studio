@@ -1,8 +1,9 @@
 'use client'
 // 游客版表格整页：拿外框给的宿主（工程清单、复制给 AI、回 /studio 的品牌）＋本档补的表格资料操作，渲染同一份 SheetPage。
 //   资料＝工程的 project.json（./guest-data.ts）；插图写进工程的 assets/、表格里存 assets/<档名>；xlsx 在浏览器本机产（含图）。
-//   要后端的挂点给空的：AI 编辑保护遮罩（永远没罩）、角色工作态、Alt+A 插进对话框（这里的对话格是「复制给 AI」·没有输入框）、
+//   要后端的挂点给空的：AI 编辑保护遮罩（永远没罩）、角色工作态、
 //     即时跟进（has 回 false；外面改了 project.json 由外框的外部改档提示接手）。
+//   Alt+A 插进对话框：没有角色对话 ⇒ 儲存格小卡插进右栏底下那个输入框（../../shared/ui/InlineCardBox·记号与画法同登入版），一鍵複製后贴给自己的 AI。
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { EditorProps, SaveState } from '../../shared/types'
@@ -12,6 +13,8 @@ import { getProject, updateProject } from '../../shared/projects'
 import { editorShell } from '../../shared/theme/editor-shell-theme'
 import { studioHref } from '../../shared/host'
 import { SheetHostProvider, type SheetHost } from '../ui/host'
+import { createInlineBox, type InlineBox } from '../../shared/inline-box'
+import { makeSheetCellsCardNode } from '../ui/cells-card-dom'
 import SheetPage from './SheetPage'
 import { createGuestSheetsData } from './guest-data'
 import { guestSheetIoHost } from './guest-import'
@@ -45,11 +48,13 @@ async function canvasPng(w: number, h: number, draw: (ctx: CanvasRenderingContex
 const NO_FLUSH: SheetShieldFlush = { onLock: () => {}, isOpen: () => false }
 const NO_SHIELD: SheetShieldHandle = { locked: false }
 const NO_ROLE = { busy: false, roster: undefined }
-const NO_CHAT_INLINE = {}
 function useNoShieldFlush(): SheetShieldFlush { return NO_FLUSH }
 function useNoShield(): SheetShieldHandle { return NO_SHIELD }
 function useNoRoleBusy() { return NO_ROLE }
-function useNoChatInline(): { insert?: (text: string) => boolean; attach?: unknown } { return NO_CHAT_INLINE }
+/** 右栏输入框的儲存格小卡（同登入版那颗·点卡 ⇒ 表格把那块选回来） */
+export function makeGuestSheetBox(openTitle: () => string): InlineBox {
+  return createInlineBox((doc, raw) => makeSheetCellsCardNode(doc, raw, openTitle()))
+}
 function NoShield() { return null }
 /** 「套回」条只在跟别人同时写撞版时出现；游客版只有自己一个人写、外面改档由外框问，不会走到这里。 */
 function NoRestoreBar(_p: SheetRestoreBarProps) { return null }
@@ -136,12 +141,21 @@ export default function SheetsGuestPage(props: GuestPageProps) {
     },
   }), [store, assetUrls, want])
 
+  // 右栏底下的输入框（Alt+A 插儲存格小卡）
+  const t = useStudioT()
+  const openTitleRef = useRef('')
+  openTitleRef.current = t('sheet_cells_open')
+  // 放 ref：本页宿主的依赖照旧只有 projectId／data／store（框这支一份用到底）
+  const boxRef = useRef<InlineBox | null>(null)
+  if (!boxRef.current) boxRef.current = makeGuestSheetBox(() => openTitleRef.current)
   // 外框宿主会随「忙不忙／资料夹授权」换一份；本页的宿主不跟着换（整页拿它当依赖·换了会重载整份表格），两格每次重绘读最新那份
   const fallback = useMemo(fallbackBaseHost, [])
   const baseRef = useRef<StudioPageHost>(base ?? fallback)
   baseRef.current = base ?? fallback
   const host = useMemo<SheetsPageHost>(() => {
     const b = () => baseRef.current
+    const box = boxRef.current!
+    const chatInline = { insert: (text: string) => box.insert(text) }
     return {
       kind: 'guest',
       docId: projectId,
@@ -151,7 +165,7 @@ export default function SheetsGuestPage(props: GuestPageProps) {
       driveSlotLabel: b().driveSlotLabel,
       renderDriveSlot: o => b().renderDriveSlot(o),
       // 这格是「复制给 AI」不是选角色 ⇒ 标题用那格自己的（登入版的「選擇角色」不适用）；收合钮照登入版放标题左边
-      renderChatSlot: o => b().renderChatSlot(o ? { titleIcon: o.titleIcon, headerExtra: o.headerExtra, dense: o.dense } : undefined),
+      renderChatSlot: o => b().renderChatSlot({ ...(o ? { titleIcon: o.titleIcon, headerExtra: o.headerExtra, dense: o.dense } : {}), inlineBox: box }),
 
       checkAuth: async () => 'ok',
       getDoc: o => data.getDoc(o),
@@ -204,7 +218,7 @@ export default function SheetsGuestPage(props: GuestPageProps) {
       useShieldFlush: useNoShieldFlush,
       useEditorAIShield: useNoShield,
       useEditorRoleBusy: useNoRoleBusy,
-      useSheetChatInline: useNoChatInline,
+      useSheetChatInline: () => chatInline,
       shieldWriteAllowed: () => true,
 
       BlockingStatus: GuestBlocking,

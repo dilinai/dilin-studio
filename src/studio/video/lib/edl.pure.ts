@@ -30,7 +30,7 @@ export function docToEdl(doc: VideoDoc, o: { assetDir?: string; assetBase?: stri
     if (c.sticker) { notes.add('sticker'); return false }
     if (c.filter || c.adjust) { notes.add('filter'); return false }
     if (c.program) { notes.add('program'); return false }
-    if (c.shape || c.solid || c.bgfx) { notes.add('shape'); return false }
+    if (c.shape || c.solid || c.bgfx || c.rig) { notes.add('shape'); return false }
     if (c.text) { notes.add('text'); return false }
     if (c.disabled) { notes.add('disabled'); return false }
     return mediaById.has(c.mediaId)

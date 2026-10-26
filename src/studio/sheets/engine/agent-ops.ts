@@ -23,7 +23,8 @@ import { applyBorderEdges, edgesForKind, sanitizeBorder, BORDER_STYLES, type Bor
 import { scanRefs, shiftFormula, shiftFormulaForStruct, shiftContentForStruct, type RefPart as ScanRefPart, type StructChange, type StructScope } from './formula-refs'
 import { applyChartOp, chartsForRead, shiftChartsForStructural, ChartOpError } from './chart'   // 图表
 import { applyCondChange, condChangeFromOp, condFormatsOut, shiftCondFormats, CondInputError, type CondOut } from './cond-format'   // 条件格式
-import { applyViewOp, shiftViewForStruct, viewOut, SheetViewError, VIEW_OP_NAMES, type ViewOut } from './sheet-view' // 冻结筛选验证
+import { applyViewOp, shiftViewForStruct, viewOut, SheetViewError, VIEW_OP_NAMES, type ViewOut } from './sheet-view' // 冻结筛选验证（＋hide 隐藏行列）
+import { findCells, replaceCells, removeDuplicates, DataToolError, type FindLookIn } from './data-tools' // 寻找取代·移除重复
 
 /** 0 起·第 999999 行（格键上限 6 位数字·同 sanitizeSheetContent 的键正则） */
 export const MAX_ROW_INDEX = 999998
@@ -493,8 +494,15 @@ export type SheetOp =
   | { op: 'freeze'; rows?: number; cols?: number }
   | { op: 'filter'; range?: string; criteria?: Record<string, unknown>; clear?: boolean }
   | { op: 'validate'; range?: string; list?: unknown[]; source?: string; allow_blank?: boolean; reject_invalid?: boolean; clear?: boolean }
+  | { op: 'hide'; rows?: string; cols?: string; hidden?: boolean; unhide_all?: boolean }
+  // 寻找取代·移除重复：口径在 ./data-tools.ts
+  | { op: 'find'; find: string; range?: string; match_case?: boolean; whole_cell?: boolean; look_in?: 'formulas' | 'values' }
+  | { op: 'replace'; find: string; replace: string; range?: string; match_case?: boolean; whole_cell?: boolean; include_formulas?: boolean }
+  | { op: 'dedupe'; range: string; columns?: string[]; has_header?: boolean }
 
-export const OP_NAMES = ['set', 'format', 'insert_rows', 'delete_rows', 'insert_cols', 'delete_cols', 'merge', 'unmerge', 'sort', 'add_image', 'update_image', 'delete_image', 'resize', 'set_chart', 'delete_chart', 'cond_format', ...VIEW_OP_NAMES] as const
+export const OP_NAMES = ['set', 'format', 'insert_rows', 'delete_rows', 'insert_cols', 'delete_cols', 'merge', 'unmerge', 'sort', 'add_image', 'update_image', 'delete_image', 'resize', 'set_chart', 'delete_chart', 'cond_format', ...VIEW_OP_NAMES, 'find', 'replace', 'dedupe'] as const
+/** find 回给 agent 的格至多几个（再多只给总数） */
+export const FIND_RESULT_MAX = 200
 
 export type OpResult = { op: string; range?: string; cells?: number; [k: string]: unknown }
 /** structs＝这次做了的插删行列（按序·0 起）——呼叫方拿去 shiftOtherSheetsForStruct 改整份文件其余各张的跨表引用 */
@@ -1039,7 +1047,54 @@ export function applyOps(input: AgentContent | null | undefined, ops: unknown, e
         break
       }
       // 冻结筛选验证：freeze／filter／validate（纯函数在 ./sheet-view.ts·错一律转 OpError ⇒ route 400 零写）
-      case 'freeze': case 'filter': case 'validate': {
+      case 'find': case 'replace': {
+        if (typeof o.find !== 'string' || o.find === '') throw new OpError(`ops[${idx}].find must be the text to look for (wildcards * ? work; ~* finds a real *)`)
+        if (o.find.length > 255) throw new OpError(`ops[${idx}].find: at most 255 characters`)
+        const bool = (k: string): boolean | undefined => { if (o[k] === undefined || o[k] === null) return undefined; if (typeof o[k] !== 'boolean') throw new OpError(`ops[${idx}].${k} must be true or false`); return o[k] as boolean }
+        let rect: Rect | null = null
+        if (o.range !== undefined && o.range !== null) { const a = needRange(o, idx); rect = clipToExtent(a, content); if (!rect) { results.push({ op: o.op, range: String(o.range), found: 0, ...(o.op === 'replace' ? { replaced: 0, changed_cells: [] } : { matches: [] }) }); break } }
+        const common = { find: o.find, matchCase: bool('match_case'), wholeCell: bool('whole_cell'), rect }
+        if (o.op === 'find') {
+          if (o.look_in !== undefined && o.look_in !== 'formulas' && o.look_in !== 'values') throw new OpError(`ops[${idx}].look_in must be "formulas" (what was typed, formulas as text) or "values" (what the cell shows)`)
+          const got = findCells(content, { ...common, lookIn: (o.look_in ?? 'formulas') as FindLookIn }, evalOpts)
+          results.push({ op: 'find', ...(rect ? { range: rectToA1(rect) } : {}), found: got.total, matches: got.hits.slice(0, FIND_RESULT_MAX).map(h => ({ cell: h.cell, text: h.text })) })
+          if (got.total > FIND_RESULT_MAX) warnings.push(`ops[${idx}]: ${got.total} cells matched; only the first ${FIND_RESULT_MAX} are listed — narrow it with range.`)
+          break
+        }
+        if (typeof o.replace !== 'string') throw new OpError(`ops[${idx}].replace must be the new text ("" deletes the match)`)
+        if (o.replace.length > CELL_TEXT_MAX) throw new OpError(`ops[${idx}].replace: text longer than ${CELL_TEXT_MAX} characters`)
+        const r = replaceCells(content, { ...common, replace: o.replace, includeFormulas: bool('include_formulas') })
+        if (r.changed.some(x => x.after.length > CELL_TEXT_MAX)) throw new OpError(`ops[${idx}]: a replaced cell would be longer than ${CELL_TEXT_MAX} characters`)
+        content.cells = r.cells
+        if (r.skippedFormulas) warnings.push(`ops[${idx}]: ${r.skippedFormulas} formula cell(s) also matched and were left as is (set include_formulas: true to change formula text too).`)
+        results.push({ op: 'replace', ...(rect ? { range: rectToA1(rect) } : {}), replaced: r.changed.length, changed_cells: r.changed.slice(0, FIND_RESULT_MAX).map(x => x.cell), skipped_formulas: r.skippedFormulas })
+        break
+      }
+      case 'dedupe': {
+        const a = needRange(o, idx)
+        let rect = a.rect
+        if (a.kind === 'cols' || a.kind === 'rows') { const used = usedRange(content); const clipped = used ? intersect(a.rect, used) : null; if (!clipped) { results.push({ op: 'dedupe', range: String(o.range), removed: 0, kept: 0 }); break } rect = clipped }
+        if (o.has_header !== undefined && typeof o.has_header !== 'boolean') throw new OpError(`ops[${idx}].has_header must be true or false`)
+        let cols: number[] | undefined
+        if (o.columns !== undefined && o.columns !== null) {
+          if (!Array.isArray(o.columns) || !o.columns.length) throw new OpError(`ops[${idx}].columns must be a list of column letters like ["A","C"]`)
+          cols = (o.columns as unknown[]).map((x, j) => {
+            if (typeof x !== 'string' || !/^\s*[A-Za-z]{1,3}\s*$/.test(x)) throw new OpError(`ops[${idx}].columns[${j}] must be a column letter`)
+            const c = colToIndex(x.trim())
+            if (c < rect.c0 || c > rect.c1) throw new OpError(`ops[${idx}].columns[${j}] ${x} is outside ${rectToA1(rect)}`)
+            return c
+          })
+        }
+        let r
+        try { r = removeDuplicates(content, rect, { columns: cols, hasHeader: o.has_header === true }, evalOpts) } catch (e) { if (e instanceof DataToolError) throw new OpError(`ops[${idx}]: ${e.message}`, e.code); throw e }
+        content.cells = r.cells
+        if (r.brokenRefs) warnings.push(`ops[${idx}]: ${r.brokenRefs} relative reference(s) moved off the sheet and now read #REF!.`)
+        const imgs = r.removed ? (content.images ?? []).filter(im => { const p = keyPos(im.cell); return !!p && rectContains(rect, p.r, p.c) }).length : 0
+        if (imgs) warnings.push(`ops[${idx}]: ${imgs} floating image(s) in the range stay where they were (images don't move with the rows).`)
+        results.push({ op: 'dedupe', range: rectToA1(rect), compared_columns: (cols ?? Array.from({ length: rect.c1 - rect.c0 + 1 }, (_, i) => rect.c0 + i)).map(c => indexToCol(c)), removed: r.removed, kept: r.kept, removed_rows: r.removedRows.slice(0, FIND_RESULT_MAX).map(x => x + 1) })
+        break
+      }
+      case 'freeze': case 'filter': case 'validate': case 'hide': {
         try { results.push(applyViewOp(content, o, idx, { parseA1, usedRange }, warnings)) } catch (e) { if (e instanceof SheetViewError) throw new OpError(e.message, e.code); throw e }
         break
       }

@@ -3,6 +3,8 @@
 import { FRAME, layersAt, timelineEnd, type MediaKindLike, type TextAnimSet, type Tracks } from './timeline.pure'
 import { fxStateAt } from './fx.pure'
 import { animSpans } from './text-anim.pure'
+import { matteKindOf, matteLaneOf, matteLanesAt } from './mask-matte.pure' // 轨道遮罩
+import { compDuration, type Comps } from './comp.pure' // 巢状合成
 
 /** 一次最多几格 */
 export const VEDIT_FRAME_MAX_TIMES = 6
@@ -38,6 +40,10 @@ export type FrameLayer = {
   lane: string; laneKind: string; clip: string; visible: boolean
   media?: { id: string; name: string | null; kind: MediaKindLike | null; at: number }
   text?: string; sticker?: string; filter?: string; program?: string; adjust?: true; shape?: string; solid?: string; bgfx?: string
+  /** 空物件／摄影机／灯光（不画进画面）·parent＝父层片段·is3d＝3D 层 */
+  rig?: string; parent?: string; is3d?: true
+  /** 合成段：哪份合成、名字、此刻画合成里第几秒（past＝出了合成长度·此刻透明） */ comp?: { id: string; name: string | null; at: number; past?: true }
+  /** 轨道遮罩：这段用谁当遮罩（lane＝遮罩那条轨·clip＝指定的那段）·四种方式；asMatte＝这层此刻被拿来当遮罩（本身不画） */ matte?: { lane: string | null; clip?: string; kind: string }; asMatte?: true
   flags?: string[]
   /** 此刻在接缝转场窗内 ⇒ 哪款、前段 from／后段 to、进度 0–1（照时间匀速·0＝刚进窗 1＝出窗）、整段几秒 */
   transition?: { tr: string; from: string; to: string; progress: number; length: number }
@@ -57,8 +63,9 @@ export function animProgress(a: TextAnimSet | undefined, seg: number, length: nu
   if (a.loop && a.loop.dur > 0) o.loop = { id: a.loop.id, dur: a.loop.dur, phase: r3((((local / a.loop.dur) % 1) + 1) % 1) }
   return Object.keys(o).length ? o : undefined
 }
-export function frameLayers(tracks: Tracks, t: number, mediaOf: (id: string) => { name: string; kind: MediaKindLike } | null | undefined): FrameLayer[] {
+export function frameLayers(tracks: Tracks, t: number, mediaOf: (id: string) => { name: string; kind: MediaKindLike } | null | undefined, comps?: Comps): FrameLayer[] {
   const out: FrameLayer[] = []
+  const mattes = matteLanesAt(tracks, t)
   for (const s of layersAt(tracks, t)) {
     if (!s.hit) continue
     const c = s.hit.clip
@@ -70,8 +77,15 @@ export function frameLayers(tracks: Tracks, t: number, mediaOf: (id: string) => 
     else if (c.shape) row.shape = c.shape.shape
     else if (c.solid) row.solid = c.solid.color
     else if (c.bgfx) row.bgfx = c.bgfx.kind
+    else if (c.rig) row.rig = c.rig.kind === 'light' ? `light:${c.rig.light}` : c.rig.kind
     else if (c.adjust) row.adjust = true
+    else if (c.comp) { const cp = comps?.[c.comp]; row.comp = { id: c.comp, name: cp?.name ?? null, at: Math.round(s.hit.local * 1000) / 1000, ...(cp && s.hit.local >= compDuration(cp) - 1e-6 ? { past: true as const } : {}) } }
     else if (c.mediaId) { const m = mediaOf(c.mediaId); row.media = { id: c.mediaId, name: m?.name ?? null, kind: m?.kind ?? null, at: Math.round(s.hit.local * 1000) / 1000 } }
+    if (c.parent) row.parent = c.parent
+    if (c.d3) row.is3d = true
+    const mt = c.look?.matte
+    if (mt && s.lane.kind === 'visual') row.matte = { lane: matteLaneOf(tracks, s.lane.id, mt), ...(mt.clip ? { clip: mt.clip } : {}), kind: matteKindOf(mt) }
+    if (mattes.has(s.lane.id)) row.asMatte = true
     // 转场（画面轨·同汇出 fxStateAt 认的那个窗）与动画进度（文字＝text.anim·画面片段／贴纸＝clip.anim）
     const st = s.lane.kind === 'visual' ? fxStateAt(s.lane, t) : null
     if (st?.trans?.head) {

@@ -7,6 +7,7 @@ import type { ReactNode, RefObject } from 'react'
 import type { ChatSlotOptions, DriveSlotOptions, StudioPageHost } from '../../shared/page-host'
 import type { StudioT } from '../../shared/types'
 import type { ApiErr, ChromeOpts, CloudTabs, DlSite, DocLock, ProjGet } from './drawboard-host'
+import type { PaintGenAiProvider, PaintSegmentConfig } from './genai'
 
 /** has() 认得的功能键（游客版全回 false·删减清单逐项写了为什么要后端） */
 export const PAINT_FEATURES = {
@@ -108,6 +109,10 @@ export interface PaintPageHost extends StudioPageHost {
   /** 左栏切到云盘页签（第一次要取树）／云盘里多了档（导出、另存）⇒ 宿主自己决定要不要重取 */
   onDriveTab?(): void
   driveChanged?(): void
+  /** 生成式填充／扩展／移除、文字转向量（用网站生图服务·扣点数）：登入版才有；没给 ⇒ 画板一律出「需登入堤麟」的说明（游客版、单机版） */
+  genai?(ctx: { folderId(): string | null }): PaintGenAiProvider
+  /** AI 去背／选择主体（AI）在浏览器本地跑的模型来源（不扣点）·没给或回 null ⇒ 画板退回传统演算法 */
+  segment?(): PaintSegmentConfig | null
   /** 画板起好时宿主自己要装的（登入版：桌面版列印） */
   install?(site: DlSite, frameWin: Window & typeof globalThis): void
   /** 存档状态（游客版报给外框：顶栏未存提示、离开前提醒）＋页面的 flush／重读两只给宿主用 */

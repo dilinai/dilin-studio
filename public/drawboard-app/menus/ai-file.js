@@ -26,6 +26,8 @@ MenuTrees.add('ai', 'file', {
     {n:{'zh-Hant':'另存新檔…', 'zh-Hans':'存储为…', en:'Save As…'}, id:'file.saveAs', key:'Ctrl+Shift+S', impl:'ai.file.saveAs'},
     {n:{'zh-Hant':'儲存拷貝…', 'zh-Hans':'存储副本…', en:'Save a Copy…'}, id:'file.saveCopy', key:'Ctrl+Alt+S', impl:'ai.file.saveCopy'},
     {n:{'zh-Hant':'另存範本…', 'zh-Hans':'存储为模板…', en:'Save as Template…'}, id:'file.saveAsTemplate', impl:'ai.file.saveAsTemplate'},
+    // 存成 Illustrator 分层档：开「存储为」对话框、格式先挑好 .ai（ai.file.saveAs format:"ai"；编码同 PS 模式 file.saveAs format:"ai"）
+    {n:{'zh-Hant':'儲存為 Illustrator (.ai)…', 'zh-Hans':'存储为 Illustrator (.ai)…', en:'Save as Illustrator (.ai)…'}, id:'file.saveAsAi', impl:{cmd:'ai.file.saveAs', params:{format:'ai'}}},
     {n:{'zh-Hant':'儲存為 PDF…', 'zh-Hans':'存储为 PDF…', en:'Save as PDF…'}, id:'file.export.pdf', impl:'ai.file.export.pdf'},
     {n:{'zh-Hant':'儲存為 Microsoft Office 適用格式…', 'zh-Hans':'存储为 Microsoft Office 所用格式…', en:'Save for Office Documents…'}, id:'document.exportForOffice', impl:'ai.document.exportForOffice'},
     {n:{'zh-Hant':'回復', 'zh-Hans':'恢复', en:'Revert'}, id:'file.revert', key:'F12', impl:'ai.file.revert'},

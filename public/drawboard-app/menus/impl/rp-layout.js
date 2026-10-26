@@ -1,6 +1,6 @@
 /* 右面板版面（1025·平板与网页同吃这页）
    ① 右面板左缘拖拉条：拖动改宽（夹 200–480·触控也能拖）·记在 localStorage·双击回 252
-   ② 分页列右端小箭头：把图层／历史记录区块收成只剩分页列，再点展开·记在 localStorage
+   ② 分页列右端箭头：整条右面板收成贴右缘的窄条（只留展开箭头），画布往右撑满；再点展开回原宽（拖拉存的宽）·记在 localStorage·收着时藏拖拉条
    ③ 选项栏灰色提示字：放不下就省略号（CSS 管），滑过看全文（这里补 title） */
 (function(){
   const rp = document.getElementById('rightpanel'), tabs = document.getElementById('rpTabs');
@@ -48,16 +48,18 @@
     btn.type = 'button'; btn.className = 'rpfold'; btn.id = 'rpFold';
     const paint = () => {
       const c = rp.classList.contains('rp-collapsed');
-      btn.textContent = c ? '▸' : '▾';
+      btn.textContent = c ? '◂' : '▸';
       btn.title = c ? T3(['展開', '展开', 'Expand']) : T3(['收起', '收起', 'Collapse']);
       btn.setAttribute('aria-expanded', c ? 'false' : 'true');
     };
-    const fold = c => { rp.classList.toggle('rp-collapsed', c); set(KC, c ? '1' : null); paint(); relayout(); };
+    const fold = c => { rp.classList.toggle('rp-collapsed', c); grip.classList.toggle('rp-hide', c); set(KC, c ? '1' : null); paint(); relayout(); };
     btn.addEventListener('click', e => { e.stopPropagation(); fold(!rp.classList.contains('rp-collapsed')); });
     tabs.appendChild(btn);
     // 收着时点分页钮 ⇒ 顺手展开（点了却什么都没出来会以为坏了）
     tabs.addEventListener('click', e => { if (e.target.closest('.rptab') && rp.classList.contains('rp-collapsed')) fold(false); });
-    if (get(KC) === '1') rp.classList.add('rp-collapsed');
+    // 收成窄条时点窄条任何地方都展开（窄条上只有那颗箭头，点偏了也该有反应）
+    rp.addEventListener('click', e => { if (rp.classList.contains('rp-collapsed') && !e.target.closest('#rpFold')) fold(false); });
+    if (get(KC) === '1') { rp.classList.add('rp-collapsed'); grip.classList.add('rp-hide'); }
     paint();
     window.RpLayout = {fold, width:w => width(w, true), collapsed:() => rp.classList.contains('rp-collapsed')};
   }

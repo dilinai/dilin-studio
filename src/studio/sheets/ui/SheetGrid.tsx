@@ -18,6 +18,7 @@
 //   货币符号按站别默认＋下拉可换·长日期随界面语言＋民國紀年·
 //     公式语法错点别处／失焦也先问（guardLeave）·填充柄多格数字＝Excel 线性趋势（在 engine/fill.ts）。
 //     几何（每列左右缘／每行上下缘）从屏上量（表格 CSS zoom 之后的真位置）·覆盖层（框线／填充柄／预览／引用框）都按它摆。
+//   尋找與取代（Ctrl／⌘+F·H·SheetFindDialog）·移除重複（SheetDedupeDialog）·列号／栏号右键隱藏／取消隱藏（藏的栏不出 col、列头 display:none、格不画·方向键跳过）。
 import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { useSheetT, useSheetLanguage, useSheetHost } from './host'
 import { editorShell } from '../../shared/theme/editor-shell-theme'
@@ -25,7 +26,7 @@ import { alertDialog, confirmDialog } from '../../shared/dialog-store'
 import { DEFAULT_COLS, DEFAULT_ROWS, cellKey, computeSheet, formatValue, cellFromInput, inputFromCell, isFormulaError, isTypedKey, stripInvisible, parseRef, indexToCol, SheetBook, type SheetContent, type SheetCells, type CellData, type BookSheet, type EvaluatorOptions } from '../engine/formula'
 import {
   type CellStyle, type Rect, type SheetImage, type ClipBlock,
-  mergeStateFor, addMerge, removeMerges, coveredMap, expandRectToMerges, parseRange, rectKeys, rectContains,
+  mergeStateFor, addMerge, removeMerges, coveredMap, expandRectToMerges, parseRange, rectKeys, rectContains, rectsOverlap,
   formatWithNumFmt, applyNumFmtAction, numFmtForKind, withCurrencySymbol, valueForInput, accountingParts, CURRENCY_SYMBOL, stepSize, INDENT_MAX,
   blockFromSelection, blockFromText, pasteBlock, applyStyleToRect, copyStyle,
 } from '../engine/style'
@@ -48,12 +49,17 @@ import type { CondUiAction } from './SheetCondFormatMenu'
 import type { DrawMode } from './SheetBorderMenu'
 // 冻结筛选验证（冻结窗格／表头筛选／下拉清单）：资料口径在 engine/sheet-view.ts·画法在 SheetFreezePanes／SheetFilterMenu／SheetValidationPanel
 import { cloneElement, type ReactElement } from 'react'
-import { filteredRows, filterRect, filterColumnValues, validationAt, validationOptions, checkListInput, putValidation, clearValidations, sanitizeFreeze, cellReaderFor, rectA1, type ViewContent, type FilterCriterion } from '../engine/sheet-view'
+import { hiddenRowSet, hiddenColSet, setHidden, SheetViewError, filterRect, filterColumnValues, validationAt, validationOptions, checkListInput, putValidation, clearValidations, sanitizeFreeze, cellReaderFor, rectA1, type ViewContent, type FilterCriterion } from '../engine/sheet-view'
 import { applyOps, OpError, type AgentContent } from '../engine/agent-ops'
 import { gridEmitNext } from '../engine/grid-emit'
 import SheetFilterMenu from './SheetFilterMenu'
 import { ValidationPanel, ValidationPicker } from './SheetValidationPanel'
 import { freezeBox, frozenStyle, fixFrozenGeo, FrozenOverlayPanes, type FreezeBox } from './SheetFreezePanes'
+// 尋找與取代／移除重複／隱藏列欄：资料口径在 engine/data-tools.ts、engine/sheet-view.ts·介面小判断在 ./sheet-data-tools.pure.ts
+import { removeDuplicates, DataToolError } from '../engine/data-tools'
+import SheetFindDialog, { type FindMode } from './SheetFindDialog'
+import SheetDedupeDialog, { type DedupeColumn } from './SheetDedupeDialog'
+import { isMultiCell, stepOverHidden, nearestVisible, headerMenuPlan, withoutHidden, hiddenEdgeMarks, visibleSpan, spanLabel, usedBounds, trimToUsed, guessHasHeader, type CellPos, type DedupeCellValue } from './sheet-data-tools.pure'
 
 /** 每次改动交给页面的附注（撤销栈用）：label＝下拉显示的字·group＝同组连续改动并成一步（自动填充选项换套法） */
 /** commit＝编辑框（格内／公式栏）的提交（writeCell）——罩落那一刻失焦提交的那一发要能过补存窗；其余动作都不带。 */
@@ -172,7 +178,10 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
   const fr = Math.min(freeze?.rows ?? 0, DEFAULT_ROWS - 1), fc = Math.min(freeze?.cols ?? 0, DEFAULT_COLS - 1)
   const viewReader = useMemo(() => cellReaderFor(view, nfLang, evalOpts), [view, nfLang, evalOpts])
   const fRect = useMemo(() => filterRect(view), [view])
-  const hiddenRows = useMemo(() => filteredRows(view, viewReader), [view, viewReader])
+  // 不显示的行＝手动藏的＋被筛掉的（资料不删）·栏＝手动藏的；manualRows 只给表头双线用（筛掉的行 Excel 不画）
+  const hiddenRows = useMemo(() => hiddenRowSet(view, viewReader), [view, viewReader])
+  const hiddenCols = useMemo(() => hiddenColSet(view), [view])
+  const manualRows = useMemo(() => new Set(view?.hiddenRows ?? []), [view?.hiddenRows])
   const [sel, setSel] = useState<Pos>({ r: 0, c: 0 })          // 活动格（锚）
   const [selEnd, setSelEnd] = useState<Pos | null>(null)        // 拖选／Shift 的另一角
   const [editing, setEditing] = useState<{ pos: Pos; value: string } | null>(null)
@@ -341,19 +350,22 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
     if (verdict !== 'ok') void alertDialog(msg)
   }, [cells, emit, readonly, view, viewReader, t])
 
+  // 一步走到哪：藏的行（手动藏／被筛掉）与藏的栏都跳过·走到头还是藏的就留在原地（stepOverHidden）
+  const stepTo = useCallback((p: Pos, dr: number, dc: number): Pos => clampPos({
+    r: dr ? stepOverHidden(p.r, dr, hiddenRows, DEFAULT_ROWS) : p.r,
+    c: dc ? stepOverHidden(p.c, dc, hiddenCols, DEFAULT_COLS) : p.c,
+  }), [hiddenRows, hiddenCols])
   const move = useCallback((dr: number, dc: number, extend = false) => {
-    if (extend) { setSelEnd(prev => clampPos({ r: (prev ?? sel).r + dr, c: (prev ?? sel).c + dc })); return }
+    if (extend) { setSelEnd(prev => stepTo(prev ?? sel, dr, dc)); return }
     setSelEnd(null)
     setSel(p => {
       // 从合并区左上往右／下走要跳过整块
       const k = cellKey(p.r, p.c)
       const m = merges.map(parseRange).find(r => r && rectContains(r, p.r, p.c))
       const base = m && covered.get(k) === undefined && (dr > 0 || dc > 0) ? { r: dr > 0 ? m.r1 : p.r, c: dc > 0 ? m.c1 : p.c } : p
-      let to = clampPos({ r: base.r + dr, c: base.c + dc })
-      while (dr !== 0 && hiddenRows.has(to.r) && to.r > 0 && to.r < DEFAULT_ROWS - 1) to = clampPos({ r: to.r + Math.sign(dr), c: to.c })   // 跳过被筛掉的行
-      return to
+      return stepTo(base, dr, dc)
     })
-  }, [merges, covered, sel, hiddenRows])
+  }, [merges, covered, sel, stepTo])
 
   const focusGrid = () => keyInputRef.current?.focus({ preventScroll: true })
   const commitEdit = useCallback((then?: { dr: number; dc: number }) => {
@@ -648,7 +660,132 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
     setValPicker({ x: b.left, y: b.bottom + 2, w: b.width })
   }, [activeKey, activeDv, readonly])
   useEffect(() => { setValPicker(null) }, [activeKey])
-  const sizesForFreeze = { headW: HEAD_W, headH: HEAD_H, colWidths, rowHeights }
+  const sizesForFreeze = { headW: HEAD_W, headH: HEAD_H, colWidths, rowHeights, hiddenRows, hiddenCols }
+
+  /** 把某格卷到看得见（冻结区里的不用卷·表头与冻结那块要让开）·几何是量出来的（已含 zoom） */
+  const scrollToCell = useCallback((r: number, c: number) => {
+    const g = gridRef.current, gm = geoRef.current
+    if (!g || !gm || gm.rowT[r] === undefined || gm.colL[c] === undefined) return
+    const fb = frzBoxRef.current, z = zoomRef.current
+    const headH = HEAD_H * z + fb.frozenH, headW = HEAD_W * z + fb.frozenW
+    if (r >= fb.fr) { if (gm.rowT[r] < g.scrollTop + headH) g.scrollTop = gm.rowT[r] - headH; else if (gm.rowB[r] > g.scrollTop + g.clientHeight) g.scrollTop = gm.rowB[r] - g.clientHeight }
+    if (c >= fb.fc) { if (gm.colL[c] < g.scrollLeft + headW) g.scrollLeft = gm.colL[c] - headW; else if (gm.colR[c] > g.scrollLeft + g.clientWidth) g.scrollLeft = gm.colR[c] - g.clientWidth }
+  }, [])
+
+  // ── 尋找與取代：Ctrl／⌘+F 尋找·Ctrl／⌘+H 取代·工具栏放大镜；浮窗在 SheetFindDialog ──
+  //   「只在選取範圍內」用开着时最近一次选的那一块（找到一格就选那一格·范围不能跟着缩成一格）
+  const [findUi, setFindUi] = useState<{ mode: FindMode; seq: number } | null>(null)
+  const [findScope, setFindScope] = useState<Rect | null>(null)
+  useEffect(() => { if (findUi && isMultiCell(rect)) setFindScope(rect) }, [findUi, rect])
+  const openFind = useCallback((mode: FindMode) => {
+    if (!findUi) setFindScope(isMultiCell(rect) ? rect : null)
+    setFindUi(u => ({ mode, seq: (u?.seq ?? 0) + 1 }))
+  }, [findUi, rect])
+  const closeFind = useCallback(() => { setFindUi(null); setFindScope(null); focusGrid() }, [])
+  const findSelect = useCallback((p: CellPos) => {
+    setSel({ r: p.row, c: p.col }); setSelEnd(null); setSelectedImage(null); setFillOpts(null)
+    scrollToCell(p.row, p.col)
+  }, [scrollToCell])
+  // 取代：整批一步进撤销栈（Ctrl+Z 一次复原）·唯读／罩期 emit 自己会挡
+  const findApply = useCallback((next: SheetCells, count: number) => {
+    if (readonly || lockedRef.current) return
+    emit({ cells: next }, { label: { k: 'replace', a: String(count) } })
+  }, [emit, readonly])
+  const cellHidden = useCallback((r: number, c: number) => hiddenRows.has(r) || hiddenCols.has(c), [hiddenRows, hiddenCols])
+
+  // ── 移除重複：选一块＝那块·只选一格＝它所在的整片资料（Excel 同）·都剪到有内容的外框（整栏选取不把底下空白算进来） ──
+  const [dedupe, setDedupe] = useState<{ rect: Rect; columns: DedupeColumn[]; header: boolean } | null>(null)
+  const openDedupe = useCallback(() => {
+    if (readonly || lockedRef.current) return
+    const base = rect.r0 === rect.r1 && rect.c0 === rect.c1 ? currentRegion(hasValueAt, activePos, bounds) : rect
+    const target = trimToUsed(base, usedBounds(cells, parseRef))
+    if (!target || (target.r0 === target.r1 && target.c0 === target.c1 && !hasValueAt(target.r0, target.c0))) { void alertDialog(t('sheet_dd_need_table')).then(focusGrid); return }
+    if (mergeRects.some(m => rectsOverlap(m, target))) { void alertDialog(t('sheet_dd_merged')).then(focusGrid); return }
+    const rows: DedupeCellValue[][] = []
+    for (let r = target.r0; r <= Math.min(target.r1, target.r0 + 200); r++) {
+      const row: DedupeCellValue[] = []
+      for (let c = target.c0; c <= target.c1; c++) { const v = values.get(cellKey(r, c)); row.push(v === undefined || v === null ? null : (v as DedupeCellValue)) }
+      rows.push(row)
+    }
+    const columns: DedupeColumn[] = []
+    for (let c = target.c0; c <= target.c1; c++) columns.push({ col: c, letter: indexToCol(c), name: display(cellKey(target.r0, c)).trim() })
+    setSel({ r: target.r0, c: target.c0 }); setSelEnd({ r: target.r1, c: target.c1 })
+    setDedupe({ rect: target, columns, header: guessHasHeader(rows) })
+  }, [readonly, rect, hasValueAt, activePos, bounds, cells, mergeRects, values, display, t])
+  const runDedupe = useCallback((d: { rect: Rect }, o: { columns: number[]; hasHeader: boolean }) => {
+    setDedupe(null)
+    if (readonly || lockedRef.current) return
+    let msg: string
+    try {
+      const res = removeDuplicates(content, d.rect, { columns: o.columns, hasHeader: o.hasHeader }, evalOpts)
+      if (res.removed) {
+        emit({ cells: res.cells }, { label: { k: 'dedupe', a: rangeText(d.rect) } })
+        const last = d.rect.r0 + (o.hasHeader ? 1 : 0) + res.kept - 1   // 留下来的资料（含表头）那一块选着
+        setSel({ r: d.rect.r0, c: d.rect.c0 }); setSelEnd({ r: Math.max(d.rect.r0, last), c: d.rect.c1 })
+        msg = t('sheet_dd_done').replace('{n}', String(res.removed)).replace('{m}', String(res.kept)) + (res.brokenRefs ? t('sheet_dd_broken').replace('{n}', String(res.brokenRefs)) : '')
+      } else msg = t('sheet_dd_none_found')
+    } catch (e) {
+      // 资料层的错是英文（给 AI 看的）·介面换中文
+      if (e instanceof DataToolError) msg = /merged/i.test(e.message) ? t('sheet_dd_merged') : t('sheet_dd_failed'); else throw e
+    }
+    // 提示框关掉焦点才回网格（先 focusGrid 会被提示框抢走、关掉后落在 body ⇒ Ctrl+Z 按了没反应）
+    void alertDialog(msg).then(focusGrid)
+  }, [readonly, content, evalOpts, emit, t])
+
+  // ── 隱藏／取消隱藏列欄：列号／栏号表头按右键的小选单（Excel 同）·改 hiddenRows／hiddenCols 进撤销栈、随内容存档 ──
+  const [headMenu, setHeadMenu] = useState<{ axis: 'row' | 'col'; index: number; x: number; y: number } | null>(null)
+  const headMenuRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!headMenu) return
+    const close = (e: Event) => { if (e.type === 'mousedown' && headMenuRef.current?.contains(e.target as Node)) return; setHeadMenu(null) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setHeadMenu(null) }
+    const g = gridRef.current
+    window.addEventListener('mousedown', close, true); window.addEventListener('keydown', onKey); g?.addEventListener('scroll', close)
+    return () => { window.removeEventListener('mousedown', close, true); window.removeEventListener('keydown', onKey); g?.removeEventListener('scroll', close) }
+  }, [headMenu])
+  const onHeaderContextMenu = (axis: 'row' | 'col', index: number) => (e: ReactMouseEvent) => {
+    if (readonly || xref) return   // 唯读 ⇒ 浏览器原选单
+    e.preventDefault()
+    if (guardLeave(focusGrid)) return
+    if (editing) commitEdit()
+    setSelectedImage(null); setFillOpts(null)
+    const [a, b] = axis === 'row' ? [rect.r0, rect.r1] : [rect.c0, rect.c1]
+    if (index < a || index > b) {   // 右键的那条不在选取里 ⇒ 先选它整条（选单只管它）
+      if (axis === 'row') { setSel({ r: index, c: 0 }); setSelEnd({ r: index, c: DEFAULT_COLS - 1 }) }
+      else { setSel({ r: 0, c: index }); setSelEnd({ r: DEFAULT_ROWS - 1, c: index }) }
+    }
+    setHeadMenu({ axis, index, x: e.clientX, y: e.clientY })
+  }
+  const headPlan = useMemo(() => {
+    if (!headMenu) return null
+    const row = headMenu.axis === 'row'
+    return headerMenuPlan({ clicked: headMenu.index, selA: row ? rect.r0 : rect.c0, selB: row ? rect.r1 : rect.c1, hidden: row ? view?.hiddenRows : view?.hiddenCols, count: row ? DEFAULT_ROWS : DEFAULT_COLS })
+  }, [headMenu, rect, view?.hiddenRows, view?.hiddenCols])
+  const applyHide = useCallback((axis: 'row' | 'col', hide: boolean, plan: NonNullable<typeof headPlan>) => {
+    if (readonly || lockedRef.current) return
+    const row = axis === 'row'
+    const list = row ? view?.hiddenRows : view?.hiddenCols
+    const fmt = (i: number) => (row ? String(i + 1) : indexToCol(i))
+    let next: number[] | undefined, label: HistoryLabel
+    if (hide) {
+      if (!plan.hide) return
+      try { next = setHidden(list, plan.hide.from, plan.hide.to, true) } catch (e) { if (e instanceof SheetViewError) { void alertDialog(t('sheet_hide_too_many')).then(focusGrid); return } throw e }
+      label = { k: row ? 'hide_rows' : 'hide_cols', a: spanLabel(plan.hide.from, plan.hide.to, fmt) }
+    } else {
+      if (!plan.unhide.length) return
+      next = withoutHidden(list, plan.unhide)
+      label = { k: row ? 'unhide_rows' : 'unhide_cols', a: spanLabel(plan.unhide[0], plan.unhide[plan.unhide.length - 1], fmt) }
+    }
+    emit(row ? { hiddenRows: next } : { hiddenCols: next }, { label })
+    if (hide && plan.hide) {
+      // 活动格被藏了 ⇒ 挪到最近一条看得见的（筛掉的行也算藏）
+      const gone = new Set<number>([...(row ? hiddenRows : hiddenCols), ...(next ?? [])])
+      if (row) { const r = nearestVisible(activePos.r, gone, DEFAULT_ROWS); setSel({ r, c: activePos.c }) }
+      else { const c = nearestVisible(activePos.c, gone, DEFAULT_COLS); setSel({ r: activePos.r, c }) }
+      setSelEnd(null)
+    }
+    focusGrid()
+  }, [readonly, view?.hiddenRows, view?.hiddenCols, emit, t, hiddenRows, hiddenCols, activePos])
 
   // ── 工具栏命令入口 ──
   useImperativeHandle(ref, () => ({
@@ -690,6 +827,9 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
         case 'condFormat': applyCondRef.current(cmd.action); break   // 条件格式
         // 冻结筛选验证
         case 'freeze': case 'filterToggle': case 'validationPanel': runViewCommand(cmd); break
+        // 尋找與取代／移除重複
+        case 'find': openFind(cmd.mode); break
+        case 'dedupe': openDedupe(); break
       }
     },
     selectionRange: () => rangeText(rect),
@@ -708,7 +848,7 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
       if (c) carriedRef.current = true
       return c
     },
-  }), [carryable, editing, barFocus, cells, activeKey, activePos, doCopy, doCut, doPaste, setStyle, toggleStyle, patchRect, rect, doMerge, values, insertImage, applyEdges, pen, hasValueAt, bounds, merges, runViewCommand])
+  }), [carryable, editing, barFocus, cells, activeKey, activePos, doCopy, doCut, doPaste, setStyle, toggleStyle, patchRect, rect, doMerge, values, insertImage, applyEdges, pen, hasValueAt, bounds, merges, runViewCommand, openFind, openDedupe])
 
   // 格式刷：起刷后下一次选区（点或拖）松手 ⇒ 套用到该选区
   const brushArmedRef = useRef(false)
@@ -999,6 +1139,7 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
       if (lk === 'i') { e.preventDefault(); toggleStyle('i'); return }
       if (lk === 'u') { e.preventDefault(); toggleStyle('u'); return }
       if (lk === 'a') { e.preventDefault(); setSel({ r: 0, c: 0 }); setSelEnd({ r: DEFAULT_ROWS - 1, c: DEFAULT_COLS - 1 }); return }
+      if (lk === 'f' || lk === 'h') { e.preventDefault(); openFind(lk === 'h' ? 'replace' : 'find'); return }   // 尋找／取代（拦下浏览器自己的搜寻／历史）
       return   // c／x／v 交给 copy／cut／paste 事件
     }
     if (k === 'ArrowDown' && e.altKey && activeDv) { e.preventDefault(); openValPicker(); return }   // Alt+↓ 开下拉清单（Excel 同）
@@ -1055,14 +1196,20 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
     for (const im of images) {
       const key = covered.get(im.cell) ?? im.cell
       const td = g.querySelector<HTMLElement>(`td[data-cell="${key}"]`)
-      if (!td) continue
-      const r = td.getBoundingClientRect()
+      const r = td?.getBoundingClientRect()
       const off = im.inCell ? 0 : 1
-      const ap = parseRef(key), sx = ap && ap.col < fc ? g.scrollLeft : 0, sy = ap && ap.row < fr ? g.scrollTop : 0   // 锚在冻结格（sticky）⇒ 扣回卷动量＝本来的位置
+      const ap = parseRef(key)
+      if (!r || (r.width === 0 && r.height === 0)) {
+        // 锚格在藏起来的行／栏（没画或 display:none）⇒ 照量出的几何摆（藏的那条零宽零高·贴在前一条后缘）
+        if (!ap || !geo || geo.colL[ap.col] === undefined || geo.rowT[ap.row] === undefined) continue
+        out[im.id] = { x: geo.colL[ap.col] + off * (im.ox ?? 0) * zoom, y: geo.rowT[ap.row] + off * (im.oy ?? 0) * zoom, cw: geo.colR[ap.col] - geo.colL[ap.col], ch: geo.rowB[ap.row] - geo.rowT[ap.row] }
+        continue
+      }
+      const sx = ap && ap.col < fc ? g.scrollLeft : 0, sy = ap && ap.row < fr ? g.scrollTop : 0   // 锚在冻结格（sticky）⇒ 扣回卷动量＝本来的位置
       out[im.id] = { x: r.left - gr.left + g.scrollLeft - sx + off * (im.ox ?? 0) * zoom, y: r.top - gr.top + g.scrollTop - sy + off * (im.oy ?? 0) * zoom, cw: r.width, ch: r.height }
     }
     setImgPos(out)
-  }, [images, covered, zoom, fr, fc])
+  }, [images, covered, zoom, fr, fc, geo])
   useLayoutEffect(() => { measureImages() }, [measureImages, content, zoom])   // zoom 变了格位也变 ⇒ 重量
   useEffect(() => { window.addEventListener('resize', measureImages); return () => window.removeEventListener('resize', measureImages) }, [measureImages])
 
@@ -1132,7 +1279,22 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
     for (const r of mergeRects) m.set(cellKey(r.r0, r.c0), r)
     return m
   }, [mergeRects])
-  const tableWidth = useMemo(() => HEAD_W + cols.reduce((s, c) => s + colWidthOf(colWidths, c), 0), [cols, colWidths])
+  const tableWidth = useMemo(() => HEAD_W + cols.reduce((s, c) => s + (hiddenCols.has(c) ? 0 : colWidthOf(colWidths, c)), 0), [cols, colWidths, hiddenCols])
+  // 藏行藏栏下的合并区：rowSpan／colSpan 只数看得见的；左上格那行被藏了 ⇒ 在第一条看得见的行补一块空格占位（不然后面的格会往左挤）
+  const mergeFill = useMemo(() => {
+    const m = new Map<string, { rect: Rect; rs: number; cs: number }>()
+    for (const mr of mergeRects) {
+      if (!hiddenRows.has(mr.r0)) continue
+      let top = -1
+      for (let i = mr.r0; i <= mr.r1; i++) if (!hiddenRows.has(i)) { top = i; break }
+      const cs = visibleSpan(mr.c0, mr.c1, hiddenCols)
+      if (top >= 0 && cs > 0) m.set(cellKey(top, mr.c0), { rect: mr, rs: visibleSpan(top, mr.r1, hiddenRows), cs })
+    }
+    return m
+  }, [mergeRects, hiddenRows, hiddenCols])
+  // 表头双线（这里藏了东西·Excel 样式）：栏＝手动藏的栏·列＝只画手动藏的（筛掉的不画）
+  const colMarks = useMemo(() => hiddenEdgeMarks(DEFAULT_COLS, c => !hiddenCols.has(c), hiddenCols), [hiddenCols])
+  const rowMarks = useMemo(() => hiddenEdgeMarks(DEFAULT_ROWS, r => !hiddenRows.has(r), manualRows), [hiddenRows, manualRows])
   const segments = useMemo(() => borderSegments(cells, mergeRects, k => covered.has(k)), [cells, mergeRects, covered])
   const cycleKeys = useMemo(() => [...values].filter(([, v]) => v === '#CYCLE!').map(([k]) => k), [values])
 
@@ -1153,7 +1315,7 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
   const errLine = isFormulaEdit && issue ? issueText(issue) : null
 
   return (
-    <div className="flex flex-col flex-1 min-h-0" data-testid="sheet-grid-root">
+    <div className="relative flex flex-col flex-1 min-h-0" data-testid="sheet-grid-root">   {/* relative：尋找浮窗钉在网格右上角 */}
       {/* 函数输入框：左＝当前格名·右＝原始内容（编辑中＝正在打的字·引用同色·语法错波浪线·函数名补全） */}
       <div className={`flex items-center gap-2 px-3 py-1.5 ${editorShell.toolbarBar} shrink-0`} data-testid="sheet-formula-bar">
         <div className="w-16 shrink-0 h-7 flex items-center justify-center rounded border border-gray-200 bg-gray-50 text-xs font-mono text-gray-700" data-testid="sheet-cell-name">{activeKey}</div>
@@ -1233,7 +1395,8 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
         <table ref={tableRef} data-testid="sheet-table" className="border-collapse table-fixed text-[13px] leading-tight" style={{ width: tableWidth, zoom }} data-brush={brush ? 'on' : undefined}>
           <colgroup>
             <col style={{ width: HEAD_W }} />
-            {cols.map(c => <col key={c} style={{ width: colWidthOf(colWidths, c) }} />)}
+            {/* 藏的栏：col 不出·列头 th display:none（留着给 measure 按序量·量到零宽）·格子不画 ⇒ 表格的栏位一一对上 */}
+            {cols.map(c => hiddenCols.has(c) ? null : <col key={c} style={{ width: colWidthOf(colWidths, c) }} />)}
           </colgroup>
           <thead className="sticky top-0 z-20">
             <tr>
@@ -1242,10 +1405,13 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
               {cols.map(c => {
                 const letter = indexToCol(c)
                 return (
-                  <th key={c} data-col={c} data-testid={`sheet-col-head-${letter}`} onMouseDown={startHeaderSelect('col', c)} style={frozenStyle('colHead', 0, c, fr, fc, geo, zoom, sizesForFreeze) ?? undefined}
+                  <th key={c} data-col={c} data-testid={`sheet-col-head-${letter}`} data-hidden={hiddenCols.has(c) ? '1' : undefined} onMouseDown={startHeaderSelect('col', c)} onContextMenu={onHeaderContextMenu('col', c)}
+                    style={hiddenCols.has(c) ? { display: 'none' } : frozenStyle('colHead', 0, c, fr, fc, geo, zoom, sizesForFreeze) ?? undefined}
                     className={`relative h-7 border border-gray-200 text-[11px] font-medium cursor-pointer ${c >= rect.c0 && c <= rect.c1 ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500'}`}>
                     {letter}
-                    {!readonly && c > 0 && <div className="absolute top-0 -left-[3px] w-[6px] h-full cursor-col-resize z-[1] hover:bg-blue-400/50" title={t('sheet_col_resize')}
+                    {colMarks.before.has(c) && <span aria-hidden data-testid={`sheet-col-hidden-mark-${letter}`} className="absolute top-0 left-0 w-[3px] h-full border-x border-gray-500 pointer-events-none" />}
+                    {colMarks.after.has(c) && <span aria-hidden data-testid={`sheet-col-hidden-mark-after-${letter}`} className="absolute top-0 right-0 w-[3px] h-full border-x border-gray-500 pointer-events-none" />}
+                    {!readonly && c > 0 && !hiddenCols.has(c - 1) && <div className="absolute top-0 -left-[3px] w-[6px] h-full cursor-col-resize z-[1] hover:bg-blue-400/50" title={t('sheet_col_resize')}
                       onMouseDown={startResize('col', c - 1)} onDoubleClick={autofit('col', c - 1)} />}
                     {!readonly && <div data-testid={`sheet-col-resize-${letter}`} className="absolute top-0 -right-[3px] w-[6px] h-full cursor-col-resize z-[1] hover:bg-blue-400/50" title={t('sheet_col_resize')}
                       onMouseDown={startResize('col', c)} onDoubleClick={autofit('col', c)} />}
@@ -1259,19 +1425,28 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
               const h = rowHeightOf(rowHeights, r)
               const fixedH = hasRowHeight(rowHeights, r)
               return (
-                <tr key={r} style={{ height: h, ...(hiddenRows.has(r) ? { display: 'none' } : {}) }} data-filtered={hiddenRows.has(r) ? '1' : undefined}>
-                  <th data-row={r} data-testid={`sheet-row-head-${r + 1}`} onMouseDown={startHeaderSelect('row', r)} style={{ height: h, ...frozenStyle('rowHead', r, 0, fr, fc, geo, zoom, sizesForFreeze) }}
+                <tr key={r} style={{ height: h, ...(hiddenRows.has(r) ? { display: 'none' } : {}) }} data-filtered={hiddenRows.has(r) ? '1' : undefined} data-hidden={manualRows.has(r) ? '1' : undefined}>
+                  <th data-row={r} data-testid={`sheet-row-head-${r + 1}`} onMouseDown={startHeaderSelect('row', r)} onContextMenu={onHeaderContextMenu('row', r)} style={{ height: h, ...frozenStyle('rowHead', r, 0, fr, fc, geo, zoom, sizesForFreeze) }}
                     className={`sticky left-0 z-10 border border-gray-200 text-[11px] font-medium cursor-pointer ${r >= rect.r0 && r <= rect.r1 ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500'}`}>
                     {r + 1}
-                    {!readonly && r > 0 && <div className="absolute left-0 -top-[3px] h-[6px] w-full cursor-row-resize z-[1] hover:bg-blue-400/50" title={t('sheet_row_resize')}
+                    {rowMarks.before.has(r) && <span aria-hidden data-testid={`sheet-row-hidden-mark-${r + 1}`} className="absolute left-0 top-0 h-[3px] w-full border-y border-gray-500 pointer-events-none" />}
+                    {rowMarks.after.has(r) && <span aria-hidden data-testid={`sheet-row-hidden-mark-after-${r + 1}`} className="absolute left-0 bottom-0 h-[3px] w-full border-y border-gray-500 pointer-events-none" />}
+                    {!readonly && r > 0 && !hiddenRows.has(r - 1) && <div className="absolute left-0 -top-[3px] h-[6px] w-full cursor-row-resize z-[1] hover:bg-blue-400/50" title={t('sheet_row_resize')}
                       onMouseDown={startResize('row', r - 1)} onDoubleClick={autofit('row', r - 1)} />}
                     {!readonly && <div data-testid={`sheet-row-resize-${r + 1}`} className="absolute left-0 -bottom-[3px] h-[6px] w-full cursor-row-resize z-[1] hover:bg-blue-400/50" title={t('sheet_row_resize')}
                       onMouseDown={startResize('row', r)} onDoubleClick={autofit('row', r)} />}
                   </th>
                   {cols.map(c => {
                     const key = cellKey(r, c)
-                    if (covered.has(key)) return null   // 合并区里被盖住的格不画（左上格 rowSpan/colSpan 盖过来）
+                    if (covered.has(key)) {   // 合并区里被盖住的格不画（左上格 rowSpan/colSpan 盖过来）·左上那行被藏了 ⇒ 这里补一块占位
+                      const fill = mergeFill.get(key)
+                      return fill ? <td key={c} rowSpan={fill.rs} colSpan={fill.cs} data-merge-fill={cellKey(fill.rect.r0, fill.rect.c0)} className="border border-gray-200"
+                        onMouseDown={e => onCellMouseDown(e, fill.rect.r0, fill.rect.c0, false)} /> : null
+                    }
                     const m = mergeAt.get(key)
+                    // 藏的栏不画；合并区左上在藏的栏、右边还有看得见的 ⇒ 照画（占的是下一条看得见的栏位）·跨度只数看得见的
+                    const span = m ? { rs: Math.max(1, visibleSpan(m.r0, m.r1, hiddenRows)), cs: visibleSpan(m.c0, m.c1, hiddenCols) } : null
+                    if (hiddenCols.has(c) && !(span && span.cs > 0)) return null
                     const isActive = r === activePos.r && c === activePos.c
                     const inRange = rectContains(rect, r, c)
                     const isEdit = !!editing && editing.pos.r === r && editing.pos.c === c
@@ -1292,7 +1467,7 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
                     if (showPick) css.paddingRight = 20
                     const clip: CSSProperties | undefined = fixedH && !isEdit ? { maxHeight: h - 1, overflow: 'hidden' } : undefined
                     return (
-                      <td key={c} data-cell={key} rowSpan={m ? m.r1 - m.r0 + 1 : undefined} colSpan={m ? m.c1 - m.c0 + 1 : undefined}
+                      <td key={c} data-cell={key} rowSpan={span ? span.rs : undefined} colSpan={span ? Math.max(1, span.cs) : undefined}
                         onMouseDown={e => onCellMouseDown(e, r, c, isEdit)}
                         onMouseEnter={() => { if (draggingRef.current) setSelEnd({ r, c }) }}
                         onDoubleClick={() => { if (!drawMode) startEdit({ r, c }) }}
@@ -1450,6 +1625,34 @@ const SheetGrid = forwardRef<SheetGridHandle, SheetGridProps>(function SheetGrid
           onPick={v => { setValPicker(null); writeCell(activeKey, v); focusGrid() }}
           onClose={() => setValPicker(null)} />
       )}
+      {/* 尋找與取代浮窗／移除重複对话框／表头右键「隱藏・取消隱藏」 */}
+      {findUi && (
+        <SheetFindDialog mode={findUi.mode} focusSeq={findUi.seq} onMode={m => setFindUi(u => ({ mode: m, seq: u?.seq ?? 0 }))}
+          content={content} evalOpts={evalOpts} active={{ row: activePos.r, col: activePos.c }}
+          scope={findScope} scopeText={findScope ? rangeText(findScope) : ''} readonly={!!readonly || !!locked}
+          isHidden={cellHidden} onSelect={findSelect} onApply={findApply} onClose={closeFind} />
+      )}
+      {dedupe && !readonly && (
+        <SheetDedupeDialog range={rangeText(dedupe.rect)} columns={dedupe.columns} defaultHeader={dedupe.header}
+          onApply={o => runDedupe(dedupe, o)} onClose={() => { setDedupe(null); focusGrid() }} />
+      )}
+      {headMenu && headPlan && !readonly && (() => {
+        const row = headMenu.axis === 'row'
+        const item = (id: string, label: string, run: () => void, disabled: boolean) => (
+          <button key={id} type="button" data-testid={`sheet-head-menu-${id}`} disabled={disabled}
+            onMouseDown={e => e.preventDefault()} onClick={() => { setHeadMenu(null); if (!disabled) run() }}
+            className={`${editorShell.menuItem} ${disabled ? 'opacity-40 cursor-default' : ''}`}>{label}</button>
+        )
+        const left = Math.max(4, Math.min(headMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 9999) - 176))
+        const top = Math.max(4, Math.min(headMenu.y, (typeof window !== 'undefined' ? window.innerHeight : 9999) - 100))
+        return (
+          <div ref={headMenuRef} data-testid="sheet-head-menu" data-axis={headMenu.axis} role="menu" className={`fixed z-[60] w-[168px] ${editorShell.menu}`} style={{ left, top }}
+            onContextMenu={e => e.preventDefault()}>
+            {item('hide', t(row ? 'sheet_hide_rows' : 'sheet_hide_cols'), () => applyHide(headMenu.axis, true, headPlan), !!locked || !headPlan.hide)}
+            {item('unhide', t(row ? 'sheet_unhide_rows' : 'sheet_unhide_cols'), () => applyHide(headMenu.axis, false, headPlan), !!locked || !headPlan.unhide.length)}
+          </div>
+        )
+      })()}
     </div>
   )
 })

@@ -11,7 +11,11 @@
    }
    读：不压缩、PackBits（RLE）、ZIP、ZIP＋预测；8／16／32 位（取高位／转 8 位）；RGB、灰度、CMYK、双色调、索引色（调色盘在色彩模式资料）、点阵（1 位）。
    写：每层 PackBits；图层蒙版（-2 通道）、剪贴、混合模式、组（lsct）、不透明度／填充不透明度（iOpa）、Unicode 名（luni）；
-       层上给了 text／fx／shape ⇒ 另写活文字（TySh）、图层样式（lfx2）、形状图层（SoCo／vstk／vmsk）（见下面「活图层」）。 */
+       层上给了 text／fx／shape ⇒ 另写活文字（TySh）、图层样式（lfx2）、形状图层（SoCo／vstk／vmsk）（见下面「活图层」）；
+       层上给了 adjust／smart／vmask ⇒ 调整图层（levl、curv…各自的资源块）、智能对象（PlLd＋SoLd，内嵌档在文件级 lnk2）、像素层的矢量蒙版（vmsk）；
+       文件级：guides（资源 1032）、paths（存储路径·资源 2000 起）、icc（资源 1039）、linked（lnk2 内嵌档）、图案叠加／纹理用到的图案（Patt）（见下面「文件级」）。
+     encode 另收 {guides:[{vertical, pos}], paths:[{name, evenOdd, paths:[{closed, knots}]}], icc:Uint8Array, linked:[{id, name, type, data}]}；
+     decode 另回 {guides, paths, icc, linked}，记录上另有 adjust:{kind, params}、placed:{id, corners, w, h, plain（只有仿射、没变形／智能滤镜）}、vmask:{paths, inverted, enabled, linked}。 */
 (function(){
 'use strict';
 if (window.PsdIO) return;
@@ -89,7 +93,11 @@ function addInfo(w, key, body){ w.latin('8BIM').latin(key).u32(body.length + pad
            autoLeading?（自动行距的比例：给了就写自动行距，leading 只当算好的值）, box?:{w, h}（段落文字的框）, fauxBold, fauxItalic, tracking,
            transform?:[a,b,c,d,tx,ty]（旋转／斜切等：TySh 的仿射，tx／ty＝变形后的 x／y；没给＝[1,0,0,1,x,y]）,
            bounds?:[l,t,r,b]（排版框）, boundingBox?:[l,t,r,b]（字墨框）：相对 TySh 原点、未经仿射；没给就不写这两栏}
-     fx:[{kind:'dropShadow'|'innerShadow'|'outerGlow'|'innerGlow'|'stroke'|'colorOverlay', enabled, blend, color:[r,g,b], opacity 0..100, angle, distance, spread, choke, size, range, source, position}]
+     fx:[{kind:'dropShadow'|'innerShadow'|'outerGlow'|'innerGlow'|'stroke'|'colorOverlay', enabled, blend, color:[r,g,b], opacity 0..100, angle, distance, spread, choke, size, range, source, position,
+          gradient?（描边：{from, to, style, angle, scale(%), reverse}）}
+         | {kind:'gradientOverlay', from, to（[r,g,b]）, style, angle, scale(%), reverse} | {kind:'satin', color, angle, distance, size, invert}
+         | {kind:'patternOverlay', pattern:{id, name, width, height, px（RGBA）}, scale(%), angle, link, phase:[x,y]}
+         | {kind:'bevelEmboss', style, technique, depth(%), up, size, soften, angle, altitude, highlightColor／Blend／Opacity(%), shadowColor／Blend／Opacity(%), contour?:{range}, texture?:{pattern, scale, depth, invert, link}}]
      shape:{fill:[r,g,b]|null, stroke:{color:[r,g,b], width, align?:'inside'|'center'|'outside', cap?:'butt'|'round'|'square', join?:'miter'|'round'|'bevel', dash?:[像素…]}|null, evenOdd, paths:[{closed, knots:[{pre:[x,y], a:[x,y], post:[x,y]}]}]}（文件坐标）
    像素照样写（文字、形状层的像素是没加样式的本体）：旧软件、缩图照画面显示，Photoshop 改了才重排。
    文件级的 Txt2（文字引擎的全局资料：排好的字形、各文字层的模型，TySh 的 TextIndex 指向这里）不写；
@@ -183,24 +191,66 @@ const FX_BLEND = {normal:'Nrml', dissolve:'Dslv', darken:'Drkn', multiply:'Mltp'
   lighten:'Lghn', screen:'Scrn', colorDodge:'CDdg', linearDodge:'linearDodge', lighterColor:'lighterColor', overlay:'Ovrl', softLight:'SftL', hardLight:'HrdL',
   vividLight:'vividLight', linearLight:'linearLight', pinLight:'pinLight', hardMix:'hardMix', difference:'Dfrn', exclusion:'Xclu', subtract:'blendSubtraction',
   divide:'blendDivide', hue:'H   ', saturation:'Strt', color:'Clr ', luminosity:'Lmns'};
-const FX_KEY = {dropShadow:'DrSh', innerShadow:'IrSh', outerGlow:'OrGl', innerGlow:'IrGl', stroke:'FrFX', colorOverlay:'SoFi'};
+const FX_KEY = {dropShadow:'DrSh', innerShadow:'IrSh', outerGlow:'OrGl', innerGlow:'IrGl', stroke:'FrFX', colorOverlay:'SoFi', gradientOverlay:'GrFl', satin:'ChFX', patternOverlay:'patternFill', bevelEmboss:'ebbl'};
 const linearCurve = () => D.obj('ShpC', {'Nm  ':D.text('Linear'), 'Crv ':D.list([D.obj('CrPt', {Hrzn:D.doub(0), Vrtc:D.doub(0)}), D.obj('CrPt', {Hrzn:D.doub(255), Vrtc:D.doub(255)})])});
+/* 渐变（两个色标、不透明度全满）：渐变叠加、渐变描边用；style ⇄ GrdT */
+const GRAD_TYPE = {linear:'Lnr ', radial:'Rdl ', angle:'Angl', reflected:'Rflc', diamond:'Dmnd'};
+const GRAD_STYLE = {}; Object.keys(GRAD_TYPE).forEach(k => { GRAD_STYLE[GRAD_TYPE[k]] = k; });
+const gradStop = (c, l) => D.obj('Clrt', {'Clr ':rgbObj(c), Type:D.en('Clry', 'UsrS'), Lctn:D.long(l), Mdpn:D.long(50)});
+const gradTrn = l => D.obj('TrnS', {Opct:D.unit('#Prc', 100), Lctn:D.long(l), Mdpn:D.long(50)});
+const gradObj = (from, to) => D.obj('Grdn', {'Nm  ':D.text('Custom'), GrdF:D.en('GrdF', 'CstS'), Intr:D.doub(4096), Clrs:D.list([gradStop(from, 0), gradStop(to, 4096)]), Trns:D.list([gradTrn(0), gradTrn(4096)])});
+const gradItems = g => ({Grad:gradObj(g.from || [0, 0, 0], g.to || [255, 255, 255]), Angl:D.unit('#Ang', +g.angle || 0), Type:D.en('GrdT', GRAD_TYPE[g.style] || 'Lnr '),
+  Rvrs:D.bool(!!g.reverse), Dthr:D.bool(false), 'Scl ':D.unit('#Prc', g.scale === undefined ? 100 : +g.scale), Algn:D.bool(true), Ofst:D.obj('Pnt ', {Hrzn:D.unit('#Prc', 0), Vrtc:D.unit('#Prc', 0)})});
+/* 斜面和浮雕的样式／方法／方向 ⇄ PS 列举 */
+const BVL_STYLE = {inner:'InrB', outer:'OtrB', emboss:'Embs', pillow:'PlEb', stroke:'strokeEmboss'}, BVL_TECH = {smooth:'SfBL', chiselHard:'PrBL', chiselSoft:'Slmt'};
+const BVL_STYLE_OF = {}, BVL_TECH_OF = {}; Object.keys(BVL_STYLE).forEach(k => { BVL_STYLE_OF[BVL_STYLE[k]] = k; }); Object.keys(BVL_TECH).forEach(k => { BVL_TECH_OF[BVL_TECH[k]] = k; });
+/* PS 的图案唯一 ID 是 36 字 UUID（8-4-4-4-12）；图案库的 id 不是这样的照 id 杂凑出一个（同一 id 永远同一个）；文件级 Patt 与样式里 Ptrn 的 Idnt 用同一个 */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function patId(id){
+  id = String(id || ''); if (UUID_RE.test(id)) return id.toLowerCase();
+  let h = '';
+  for (let k = 0; k < 4; k++){ let x = (0x811c9dc5 ^ Math.imul(k, 0x9e3779b9)) >>> 0; for (let i = 0; i < id.length; i++){ x ^= id.charCodeAt(i); x = Math.imul(x, 0x01000193) >>> 0; } h += x.toString(16).padStart(8, '0'); }
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+let pattLay = null;                                                       // 这一次 encode 的图案写法（PATT_LAYOUT＋o.pattLayout）
+const pattIdOf = id => (pattLay && pattLay.uuid === false ? String(id) : patId(id));
+const patRef = p => D.obj('Ptrn', {'Nm  ':D.text(p.name || 'Pattern'), Idnt:D.text(pattIdOf(p.id))});
+/* PS CS6 起每个效果都带 present／showInDialog（样式对话框里有这一项）；没有的话有些读法（psd-tools）当效果不存在 */
+const fxObj = (key, d) => { const {enab, ...rest} = d; return D.obj(key, Object.assign({enab, present:D.bool(true), showInDialog:D.bool(true)}, rest)); };
 function lfx2Block(fx){
   const items = {'Scl ':D.unit('#Prc', 100), masterFXSwitch:D.bool(true)};
   for (const e of fx){
     const base = {enab:D.bool(e.enabled !== false), 'Md  ':D.en('BlnM', FX_BLEND[e.blend] || 'Nrml'), 'Clr ':rgbObj(e.color || [0, 0, 0]), Opct:D.unit('#Prc', e.opacity === undefined ? 100 : +e.opacity)};
     let d;
-    if (e.kind === 'dropShadow' || e.kind === 'innerShadow') d = Object.assign(base, {uglg:D.bool(false), lagl:D.unit('#Ang', +e.angle || 0), Dstn:D.unit('#Pxl', +e.distance || 0),
+    if (e.kind === 'bevelEmboss'){
+      d = {enab:base.enab, hglM:D.en('BlnM', FX_BLEND[e.highlightBlend] || 'Scrn'), hglC:rgbObj(e.highlightColor || [255, 255, 255]), hglO:D.unit('#Prc', e.highlightOpacity === undefined ? 75 : +e.highlightOpacity),
+        sdwM:D.en('BlnM', FX_BLEND[e.shadowBlend] || 'Mltp'), sdwC:rgbObj(e.shadowColor || [0, 0, 0]), sdwO:D.unit('#Prc', e.shadowOpacity === undefined ? 75 : +e.shadowOpacity),
+        bvlT:D.en('bvlT', BVL_TECH[e.technique] || 'SfBL'), bvlS:D.en('BESl', BVL_STYLE[e.style] || 'InrB'), uglg:D.bool(false), lagl:D.unit('#Ang', +e.angle || 0), Lald:D.unit('#Ang', e.altitude === undefined ? 30 : +e.altitude),
+        srgR:D.unit('#Prc', e.depth === undefined ? 100 : +e.depth), blur:D.unit('#Pxl', +e.size || 0), bvlD:D.en('BESs', e.up === false ? 'Out ' : 'In  '), TrnS:linearCurve(), antialiasGloss:D.bool(false),
+        Sftn:D.unit('#Pxl', +e.soften || 0), useShape:D.bool(!!e.contour), MpgS:linearCurve(), AntA:D.bool(false), Inpr:D.unit('#Prc', e.contour ? +e.contour.range * 100 : 50), useTexture:D.bool(!!(e.texture && e.texture.pattern))};
+      if (e.texture && e.texture.pattern) Object.assign(d, {Ptrn:patRef(e.texture.pattern), 'Scl ':D.unit('#Prc', +e.texture.scale * 100), textureDepth:D.unit('#Prc', +e.texture.depth * 100),
+        InvT:D.bool(!!e.texture.invert), Algn:D.bool(e.texture.link !== false), phase:D.obj('Pnt ', {Hrzn:D.doub(0), Vrtc:D.doub(0)})});
+      items[FX_KEY[e.kind]] = fxObj(FX_KEY[e.kind], d); continue;
+    }
+    if (e.kind === 'gradientOverlay') d = Object.assign({enab:base.enab, 'Md  ':base['Md  '], Opct:base.Opct}, gradItems(e));
+    else if (e.kind === 'satin') d = {enab:base.enab, 'Md  ':base['Md  '], 'Clr ':base['Clr '], AntA:D.bool(false), Invr:D.bool(e.invert !== false), Opct:base.Opct,
+      lagl:D.unit('#Ang', +e.angle || 0), Dstn:D.unit('#Pxl', +e.distance || 0), blur:D.unit('#Pxl', +e.size || 0), MpgS:linearCurve()};
+    else if (e.kind === 'patternOverlay'){
+      if (!e.pattern || !e.pattern.id) continue;
+      d = {enab:base.enab, 'Md  ':base['Md  '], Opct:base.Opct, Ptrn:patRef(e.pattern), Angl:D.unit('#Ang', +e.angle || 0), 'Scl ':D.unit('#Prc', e.scale === undefined ? 100 : +e.scale),
+        Algn:D.bool(e.link !== false), phase:D.obj('Pnt ', {Hrzn:D.doub(e.phase ? +e.phase[0] || 0 : 0), Vrtc:D.doub(e.phase ? +e.phase[1] || 0 : 0)})};
+    }
+    else if (e.kind === 'dropShadow' || e.kind === 'innerShadow') d = Object.assign(base, {uglg:D.bool(false), lagl:D.unit('#Ang', +e.angle || 0), Dstn:D.unit('#Pxl', +e.distance || 0),
       Ckmt:D.unit('#Pxl', +(e.kind === 'dropShadow' ? e.spread : e.choke) || 0), blur:D.unit('#Pxl', +e.size || 0), Nose:D.unit('#Prc', 0), AntA:D.bool(false), TrnS:linearCurve()},
       e.kind === 'dropShadow' ? {layerConceals:D.bool(e.knocksOut !== false)} : {});
     else if (e.kind === 'outerGlow' || e.kind === 'innerGlow') d = Object.assign(base, {GlwT:D.en('BETE', e.technique === 'precise' ? 'PrBL' : 'SfBL'), Ckmt:D.unit('#Pxl', +(e.kind === 'outerGlow' ? e.spread : e.choke) || 0),
       blur:D.unit('#Pxl', +e.size || 0), Nose:D.unit('#Prc', 0), ShdN:D.unit('#Prc', 0), AntA:D.bool(false), TrnS:linearCurve(), Inpr:D.unit('#Prc', e.range === undefined ? 50 : +e.range)},
       e.kind === 'innerGlow' ? {glwS:D.en('IGSr', e.source === 'center' ? 'SrcC' : 'SrcE')} : {});
-    else if (e.kind === 'stroke') d = {enab:base.enab, Styl:D.en('FStl', e.position === 'inside' ? 'InsF' : e.position === 'center' ? 'CtrF' : 'OutF'), PntT:D.en('FrFl', 'SClr'),
-      'Md  ':base['Md  '], Opct:base.Opct, 'Sz  ':D.unit('#Pxl', +e.size || 0), 'Clr ':base['Clr ']};
+    else if (e.kind === 'stroke') d = Object.assign({enab:base.enab, Styl:D.en('FStl', e.position === 'inside' ? 'InsF' : e.position === 'center' ? 'CtrF' : 'OutF'), PntT:D.en('FrFl', e.gradient ? 'GrFl' : 'SClr'),
+      'Md  ':base['Md  '], Opct:base.Opct, 'Sz  ':D.unit('#Pxl', +e.size || 0), 'Clr ':base['Clr ']}, e.gradient ? gradItems(e.gradient) : {});   // 渐变描边：填色类型 GrFl＋渐变各栏
     else if (e.kind === 'colorOverlay') d = base;
     else continue;
-    items[FX_KEY[e.kind]] = D.obj(FX_KEY[e.kind], d);
+    items[FX_KEY[e.kind]] = fxObj(FX_KEY[e.kind], d);
   }
   const w = new Wr().u32(0); w.raw(dDesc('null', items)); return w.bytes();
 }
@@ -222,26 +272,249 @@ function vstkBlock(s){
     strokeStyleContent:D.obj('solidColorLayer', {'Clr ':rgbObj(s.stroke ? s.stroke.color : [0, 0, 0])}), strokeStyleResolution:D.doub(72),
   });
 }
-function vmskBlock(s, W, H){
-  const w = new Wr().u32(3).u32(0);
+/* 路径记录（每笔 26 位元组：填色规则、起始填色、各子路径的长度记录＋锚点）：矢量蒙版与存储路径资源共用 */
+function pathRecords(w, paths, evenOdd, W, H){
   const fx = v => w.i32(Math.round(v * 16777216));
   const pt = (p) => { fx(p[1] / H); fx(p[0] / W); };
   w.u16(6); for (let i = 0; i < 24; i++) w.u8(0);
   w.u16(8).u16(0); for (let i = 0; i < 22; i++) w.u8(0);
-  for (const p of s.paths){
-    w.u16(p.closed ? 0 : 3).u16(p.knots.length).u16(1).u16(s.evenOdd ? 1 : 2); for (let i = 0; i < 18; i++) w.u8(0);
+  for (const p of paths){
+    w.u16(p.closed ? 0 : 3).u16(p.knots.length).u16(1).u16(evenOdd ? 1 : 2); for (let i = 0; i < 18; i++) w.u8(0);
     for (const k of p.knots){ w.u16(p.closed ? 2 : 5); pt(k.pre); pt(k.a); pt(k.post); }
   }
+}
+/* flags：1 反相、2 不链接、4 停用（像素层的矢量蒙版用；形状图层 0） */
+function vmskBlock(s, W, H, flags){ const w = new Wr().u32(3).u32(flags | 0); pathRecords(w, s.paths, s.evenOdd, W, H); return w.bytes(); }
+
+/* ── 调整图层：各种调整一个资源块（照 Adobe Photoshop File Formats Specification「Adjustment layer」各节；结构参照 ag-psd）──
+   层上给 adjust:{kind, params（PsImage.toParams 那份）, cube?:{name, data:Uint8Array}（颜色查找的 .cube 内容）}；
+   层本身没像素（矩形 0），蒙版、不透明度、混合、剪贴照一般图层写。 */
+const ADJ_KEY = {brightnessContrast:'brit', levels:'levl', curves:'curv', exposure:'expA', vibrance:'vibA', hueSaturation:'hue2', colorBalance:'blnc', blackWhite:'blwh',
+  photoFilter:'phfl', channelMixer:'mixr', colorLookup:'clrL', invert:'nvrt', posterize:'post', threshold:'thrs', gradientMap:'grdm', selectiveColor:'selc'};
+const ADJ_KIND_OF = {}; Object.keys(ADJ_KEY).forEach(k => { ADJ_KIND_OF[ADJ_KEY[k]] = k; });
+const HUE_KEYS = ['reds', 'yellows', 'greens', 'cyans', 'blues', 'magentas'];
+const SC_KEYS = ['reds', 'yellows', 'greens', 'cyans', 'blues', 'magentas', 'whites', 'neutrals', 'blacks'];
+const hexRgb = h => { if (Array.isArray(h)) return h.slice(0, 3); const s = String(h || '#000000').replace(/^#/, ''); return [0, 2, 4].map(i => parseInt(s.slice(i, i + 2), 16) || 0); };
+const rgbHex = c => '#' + c.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+const iC = (v, lo, hi, d) => Math.max(lo, Math.min(hi, Math.round(isFinite(+v) ? +v : d)));
+const f32w = (w, v) => { const d = new DataView(new ArrayBuffer(4)); d.setFloat32(0, +v || 0); for (let i = 0; i < 4; i++) w.u8(d.getUint8(i)); return w; };
+const uniStr = (w, s) => { s = String(s); w.u32(s.length + 1); for (let i = 0; i < s.length; i++) w.u16(s.charCodeAt(i)); w.u16(0); return w; };
+const desc16 = (cls, items) => dDesc(cls, items);                         // 版本 16＋描述子
+/* 曲线：点 [[输入, 输出]…]；铅笔曲线（256 格）取 19 个等距点（PS 曲线最多 19 点） */
+const crvPts = v => !v ? [[0, 0], [255, 255]] : v.pencil ? Array.from({length:19}, (_, k) => { const i = Math.round(k * 255 / 18); return [i, v.pencil[i]]; }) : v;
+function adjBlocks(a){
+  const p = a.params || {}, w = new Wr(), out = [[ADJ_KEY[a.kind], null]];
+  switch (a.kind){
+    case 'invert': break;
+    case 'brightnessContrast':
+      w.i16(iC(p.brightness, -150, 150, 0)).i16(iC(p.contrast, -100, 100, 0)).i16(127).u8(0);
+      // PS CS3 起的新算法（非旧版）另存 CgEd 描述子；brit 只给旧软件
+      out.push(['CgEd', desc16('null', {Vrsn:D.long(1), Brgh:D.long(iC(p.brightness, -150, 150, 0)), Cntr:D.long(iC(p.contrast, -100, 100, 0)), means:D.long(127),
+        'Lab ':D.bool(false), useLegacy:D.bool(!!p.legacy), Auto:D.bool(false)})]);
+      break;
+    case 'levels': {
+      const rec = c => { c = c || {}; w.u16(iC(c.inBlack, 0, 253, 0)).u16(iC(c.inWhite, 2, 255, 255)).u16(iC(c.outBlack, 0, 255, 0)).u16(iC(c.outWhite, 0, 255, 255)).u16(iC((c.gamma === undefined ? 1 : c.gamma) * 100, 1, 999, 100)); };
+      w.u16(2); rec(p); rec(p.red); rec(p.green); rec(p.blue); for (let i = 4; i < 29; i++) rec(null);
+      break;
+    }
+    case 'curves': {
+      const ch = [p.points, p.red, p.green, p.blue].map(crvPts);
+      const ident = c => c.length === 2 && c[0][0] === 0 && c[0][1] === 0 && c[1][0] === 255 && c[1][1] === 255;
+      const on = ch.map((c, i) => i === 0 || !ident(c));
+      w.u8(0).u16(1).u32(on.reduce((m, v, i) => m | (v ? 1 << i : 0), 0));
+      const pts = c => { w.u16(c.length); for (const q of c) w.u16(iC(q[1], 0, 255, 0)).u16(iC(q[0], 0, 255, 0)); };   // 每点：输出、输入
+      ch.forEach((c, i) => { if (on[i]) pts(c); });
+      w.latin('Crv ').u16(4).u32(on.filter(Boolean).length);                 // PS 4.0 起的附加段：色版序号＋点
+      ch.forEach((c, i) => { if (on[i]){ w.u16(i); pts(c); } });
+      break;
+    }
+    case 'exposure': w.u16(1); f32w(w, p.exposure); f32w(w, p.offset); f32w(w, p.gamma === undefined ? 1 : p.gamma); break;
+    case 'vibrance': return [['vibA', desc16('null', {vibrance:D.long(iC(p.vibrance, -100, 100, 0)), Strt:D.long(iC(p.saturation, -100, 100, 0))})]];
+    case 'hueSaturation': {
+      const hsl = (h, s, l) => w.i16(iC(h, -180, 360, 0)).i16(iC(s, -100, 100, 0)).i16(iC(l, -100, 100, 0));
+      w.u16(2).u8(p.colorize ? 1 : 0).u8(0);
+      if (p.colorize){ hsl(p.hue, p.saturation, p.lightness); hsl(0, 0, 0); } else { hsl(0, 25, 0); hsl(p.hue, p.saturation, p.lightness); }
+      HUE_KEYS.forEach((k, i) => { const r = p[k] || {}, c = 60 * i, b = Array.isArray(r.range) ? r.range : [c - 45, c - 15, c + 15, c + 45];
+        b.forEach(v => w.i16(((Math.round(v) % 360) + 360) % 360)); hsl(r.hue, r.saturation, r.lightness); });
+      break;
+    }
+    case 'colorBalance':
+      for (const k of ['shadows', 'midtones', 'highlights']) (p[k] || [0, 0, 0]).forEach(v => w.i16(iC(v, -100, 100, 0)));
+      w.u8(p.preserveLuminosity === false ? 0 : 1).u8(0);
+      break;
+    case 'blackWhite': return [['blwh', desc16('null', {'Rd  ':D.long(iC(p.reds, -200, 300, 40)), Yllw:D.long(iC(p.yellows, -200, 300, 60)), 'Grn ':D.long(iC(p.greens, -200, 300, 40)),
+      'Cyn ':D.long(iC(p.cyans, -200, 300, 60)), 'Bl  ':D.long(iC(p.blues, -200, 300, 20)), Mgnt:D.long(iC(p.magentas, -200, 300, 80)), useTint:D.bool(!!p.tint), tintColor:rgbObj(hexRgb(p.tintColor || '#e1d3b3')),
+      bwPresetKind:D.long(1), blackAndWhitePresetFileName:D.text('')})]];
+    case 'photoFilter': { const c = hexRgb(p.color || '#ec8a00');                 // 版本 2：RGB 色彩空间＋4 个 16 位分量
+      w.u16(2).u16(0).u16(c[0] * 257).u16(c[1] * 257).u16(c[2] * 257).u16(0).u32(iC(p.density, 1, 100, 25)).u8(p.preserveLuminosity === false ? 0 : 1); break; }
+    case 'channelMixer': {
+      const row = r => { r = r || [0, 0, 0, 0]; w.i16(iC(r[0], -200, 200, 0)).i16(iC(r[1], -200, 200, 0)).i16(iC(r[2], -200, 200, 0)).i16(0).i16(iC(r[3], -200, 200, 0)); };
+      w.u16(1).u16(p.monochrome ? 1 : 0);
+      if (p.monochrome){ row(p.gray || p.red); row(null); row(null); row(null); } else { row(p.red); row(p.green); row(p.blue); row(null); }
+      break;
+    }
+    case 'selectiveColor':
+      w.u16(1).u16(p.method === 'absolute' ? 1 : 0); for (let i = 0; i < 4; i++) w.i16(0);   // 第一笔不用
+      SC_KEYS.forEach(k => { const v = p[k] || [0, 0, 0, 0]; for (let j = 0; j < 4; j++) w.i16(iC(v[j], -100, 100, 0)); });
+      break;
+    case 'gradientMap': {
+      const st = Array.isArray(p.stops) && p.stops.length >= 2 ? p.stops : [[0, '#000000'], [1, '#ffffff']];
+      w.u16(1).u8(p.reverse ? 1 : 0).u8(p.dither ? 1 : 0); uniStr(w, 'Custom'); w.u16(st.length);
+      for (const [t, h] of st){ const c = hexRgb(h); w.u32(Math.round(Math.max(0, Math.min(1, +t)) * 4096)).u32(50).u16(0).u16(c[0] * 257).u16(c[1] * 257).u16(c[2] * 257).u16(0).u16(0); }
+      w.u16(2); for (const t of [0, 4096]) w.u32(t).u32(50).u16(255);
+      w.u16(2).u16(4096).u16(32).u16(0).u32(0).u16(0).u16(0).u32(2048).u16(3);   // 实色渐变：平滑度 100%、RGB
+      for (let i = 0; i < 4; i++) w.u16(0); for (let i = 0; i < 4; i++) w.u16(0x8000); w.u16(0);
+      break;
+    }
+    case 'posterize': w.u16(iC(p.levels, 2, 255, 4)).u16(0); break;
+    case 'threshold': w.u16(iC(p.level, 1, 255, 128)).u16(0); break;
+    case 'colorLookup': {
+      const cube = a.cube && a.cube.data && a.cube.data.length ? a.cube : null;
+      w.u16(1); w.raw(desc16('null', Object.assign({lookupType:D.en('colorLookupType', '3DLUT'), 'Nm  ':D.text(cube ? cube.name : ''), Dthr:D.bool(!!p.dither)},
+        cube ? {LUTFormat:D.en('LUTFormatType', 'LUTFormatCUBE'), dataOrder:D.en('colorLookupOrder', 'rgbOrder'), tableOrder:D.en('colorLookupOrder', 'bgrOrder'),
+          LUT3DFileData:D.raw(cube.data), LUT3DFileName:D.text(cube.name)} : {})));
+      break;
+    }
+    default: return [];
+  }
+  out[0][1] = w.bytes();
+  return out;
+}
+/* 调整图层读回 ⇒ {kind, params（PsImage.fromParams 收的那份）}；读不懂 ⇒ null */
+function readAdj(key, u8, dv, s, L, extra){
+  const kind = ADJ_KIND_OF[key]; if (!kind) return null;
+  let o = s; const u16 = () => { const v = dv.getUint16(o); o += 2; return v; }, i16 = () => { const v = dv.getInt16(o); o += 2; return v; };
+  const u32 = () => { const v = dv.getUint32(o); o += 4; return v; };
+  const desc = () => rDesc(u8, dv, o + 4)[0];
+  const ev = x => x && typeof x === 'object' ? (x.value !== undefined ? x.value : x) : x;
+  switch (kind){
+    case 'invert': return {kind, params:{}};
+    case 'brightnessContrast': {
+      const C = extra && extra.CgEd;
+      if (C) return {kind, params:{brightness:+C.Brgh || 0, contrast:+C.Cntr || 0, legacy:!!C.useLegacy}};
+      return {kind, params:{brightness:i16(), contrast:i16(), legacy:true}};
+    }
+    case 'levels': {
+      if (u16() !== 2) return null;
+      const rec = () => { const r = {inBlack:u16(), inWhite:u16(), outBlack:u16(), outWhite:u16(), gamma:u16() / 100}; return r; };
+      const m = rec(); return {kind, params:Object.assign(m, {red:rec(), green:rec(), blue:rec()})};
+    }
+    case 'curves': {
+      o++; if (u16() !== 1) return null; const bits = u32(), ch = [null, null, null, null];
+      const pts = () => { const n = u16(), a = []; for (let i = 0; i < n; i++){ const out = u16(), inp = u16(); a.push([inp, out]); } return a; };
+      for (let i = 0; i < 32; i++) if (bits & (1 << i)){ const a = pts(); if (i < 4) ch[i] = a; }
+      if (o + 10 <= s + L && String.fromCharCode(u8[o], u8[o + 1], u8[o + 2], u8[o + 3]) === 'Crv '){ o += 4; u16(); const n = u32(); for (let k = 0; k < n; k++){ const i = u16(), a = pts(); if (i < 4) ch[i] = a; } }
+      const P = {}; ['points', 'red', 'green', 'blue'].forEach((k, i) => { if (ch[i] && ch[i].length >= 2) P[k] = ch[i]; });
+      return {kind, params:P};
+    }
+    case 'exposure': { u16(); const e = dv.getFloat32(o), f = dv.getFloat32(o + 4), g = dv.getFloat32(o + 8); const r = v => Math.round(v * 1e4) / 1e4; return {kind, params:{exposure:r(e), offset:r(f), gamma:r(g)}}; }
+    case 'vibrance': { const d = desc(); return {kind, params:{vibrance:+d.vibrance || 0, saturation:+d.Strt || 0}}; }
+    case 'hueSaturation': {
+      if (u16() !== 2) return null; const colorize = !!u8[o]; o += 2;
+      const hsl = () => ({hue:i16(), saturation:i16(), lightness:i16()}), col = hsl(), mas = hsl(), P = Object.assign({colorize}, colorize ? col : mas);
+      HUE_KEYS.forEach(k => { const range = [i16(), i16(), i16(), i16()]; P[k] = Object.assign(hsl(), {range}); });
+      return {kind, params:P};
+    }
+    case 'colorBalance': { const t = () => [i16(), i16(), i16()]; const P = {shadows:t(), midtones:t(), highlights:t()}; P.preserveLuminosity = !!u8[o]; return {kind, params:P}; }
+    case 'blackWhite': { const d = desc(), c = rgbOfDesc(d.tintColor);
+      return {kind, params:{reds:+d['Rd  '], yellows:+d.Yllw, greens:+d['Grn '], cyans:+d['Cyn '], blues:+d['Bl  '], magentas:+d.Mgnt, tint:!!d.useTint, ...(c ? {tintColor:rgbHex(c)} : {})}}; }
+    case 'photoFilter': {
+      const ver = u16(); let c;
+      if (ver === 3){ const Lb = dv.getInt32(o) / 100, aa = dv.getInt32(o + 4) / 100, bb = dv.getInt32(o + 8) / 100; o += 12; c = labToRgb(Lb, aa, bb); }
+      else { const sp = u16(), v = [u16(), u16(), u16(), u16()]; if (sp !== 0) return null; c = v.slice(0, 3).map(x => x / 257); }
+      const density = u32(), preserve = !!u8[o];
+      return {kind, params:{color:rgbHex(c), density, preserveLuminosity:preserve}};
+    }
+    case 'channelMixer': {
+      u16(); const mono = !!u16(); const row = () => { const r = [i16(), i16(), i16()]; i16(); r.push(i16()); return r; };
+      if (mono) return {kind, params:{monochrome:true, gray:row()}};
+      return {kind, params:{monochrome:false, red:row(), green:row(), blue:row()}};
+    }
+    case 'selectiveColor': { u16(); const abs = u16() === 1; o += 8; const P = {method:abs ? 'absolute' : 'relative'}; SC_KEYS.forEach(k => { P[k] = [i16(), i16(), i16(), i16()]; }); return {kind, params:P}; }
+    case 'gradientMap': {
+      u16(); const reverse = !!u8[o], dither = !!u8[o + 1]; o += 2; const nl = u32(); o += nl * 2;
+      const n = u16(), stops = [];
+      for (let i = 0; i < n; i++){ const loc = u32(); u32(); const sp = u16(), v = [u16(), u16(), u16(), u16()]; u16(); if (sp !== 0) return null; stops.push([Math.round(loc / 4096 * 1e4) / 1e4, rgbHex(v.slice(0, 3).map(x => x / 257))]); }
+      return stops.length >= 2 ? {kind, params:{stops, reverse, dither}} : null;
+    }
+    case 'posterize': return {kind, params:{levels:u16()}};
+    case 'threshold': return {kind, params:{level:u16()}};
+    case 'colorLookup': {
+      u16(); const d = desc(), P = {dither:!!d.Dthr};
+      const name = String(d.LUT3DFileName || d['Nm  '] || ''), data = d.LUT3DFileData;
+      if (data && data.length && ev(d.LUTFormat) === 'LUTFormatCUBE'){ let t = ''; for (let i = 0; i < data.length; i++) t += String.fromCharCode(data[i]); P.data = t; P.fileName = name || 'lut.cube'; }
+      return {kind, params:P, lutName:name};
+    }
+  }
+  return null;
+}
+const labToRgb = (L, a, b) => {
+  const fy = (L + 16) / 116, fx = fy + a / 500, fz = fy - b / 200, f = t => t > 6 / 29 ? t * t * t : 3 * (6 / 29) ** 2 * (t - 4 / 29);
+  const X = 0.9642 * f(fx), Y = f(fy), Z = 0.8249 * f(fz), lin = [3.1339 * X - 1.6169 * Y - 0.4906 * Z, -0.9788 * X + 1.9161 * Y + 0.0335 * Z, 0.072 * X - 0.229 * Y + 1.4057 * Z];
+  return lin.map(c => 255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(Math.max(c, 0), 1 / 2.4) - 0.055));
+};
+
+/* ── 智能对象：层上 PlLd（旧式）＋SoLd（描述子）指向文件级 lnk2 里的内嵌档（同一个唯一 ID）──
+   smart:{id（唯一 ID）, w, h（来源像素大小）, corners:[左上 x,y, 右上, 右下, 左下]（文件坐标）}；层的像素＝画面上的样子（PS 改了才重算）。 */
+const warpDesc = (w, h) => D.obj('warp', {warpStyle:D.en('warpStyle', 'warpNone'), warpValue:D.doub(0), warpPerspective:D.doub(0), warpPerspectiveOther:D.doub(0), warpRotate:D.en('Ornt', 'Hrzn'),
+  bounds:D.obj('Rctn', {'Top ':D.unit('#Pxl', 0), Left:D.unit('#Pxl', 0), Btom:D.unit('#Pxl', h), Rght:D.unit('#Pxl', w)}), uOrder:D.long(4), vOrder:D.long(4)});
+function plLdBlock(sm){
+  const w = new Wr().latin('plcL').u32(3).raw(pascal(sm.id, 1)).u32(1).u32(1).u32(16).u32(2);
+  for (const v of sm.corners) f64w(w, v);
+  w.u32(0).u32(16); const wd = warpDesc(sm.w, sm.h); dItems(w, wd.cls, wd.items);
   return w.bytes();
 }
+function soLdBlock(sm){
+  const tr = () => D.list(sm.corners.map(v => D.doub(v)));
+  const w = new Wr().latin('soLD').u32(4);
+  w.raw(desc16('null', {Idnt:D.text(sm.id), placed:D.text(sm.id), PgNm:D.long(1), totalPages:D.long(1), frameStep:D.obj('null', {numerator:D.long(0), denominator:D.long(600)}),
+    duration:D.obj('null', {numerator:D.long(0), denominator:D.long(600)}), frameCount:D.long(1), Annt:D.long(16), Type:D.long(2), Trnf:tr(), nonAffineTransform:tr(), warp:warpDesc(sm.w, sm.h),
+    'Sz  ':D.obj('Pnt ', {Wdth:D.doub(sm.w), Hght:D.doub(sm.h)}), Rslt:D.unit('#Rsl', 72), comp:D.long(-1), compInfo:D.obj('null', {compID:D.long(-1), originalCompID:D.long(-1)})}));
+  return w.bytes();
+}
+/* lnk2 一笔（liFD 版本 7：内嵌档）；外面 8 位元组长度、各笔补到 4 的倍数 */
+function lnk2Entry(f){
+  const w = new Wr().latin('liFD').u32(7).raw(pascal(f.id, 1));
+  uniStr(w, f.name || 'embedded'); w.latin(((f.type || '') + '    ').slice(0, 4)).latin('8BIM').u64(f.data.length).u8(0).raw(f.data);
+  uniStr(w, ''); f64w(w, 0); w.u8(0);
+  const b = w.bytes(), o = new Wr().u64(b.length).raw(b); for (let i = 0; i < pad4(b.length); i++) o.u8(0);
+  return o.bytes();
+}
+/* 图案（Patt·规格「Patterns」）：一笔＝长度 4｜版本 1｜模式 3（RGB）｜高 2、宽 2｜Unicode 名｜Pascal 唯一 ID｜虚拟记忆阵列清单：
+   版本 3｜长度｜矩形｜通道槽数 N｜N＋2 个 VMA（有没有写 4｜长度 4｜深度 4｜矩形 16｜深度 2｜压缩 1｜资料），后两槽＝使用者蒙版、透明度；每笔补到 4 的倍数。
+   照 PS 自己的写法（Krita 写给 PS 读的 ASL 图案、psd-tools 照 PS 内建图案）：通道槽固定 24、RGB 只写前 3 槽其余「没写」、资料 RLE、透明度放最后一槽、ID 是 UUID。
+   原本写 3 槽、不压缩、透明度放倒数第二槽（使用者蒙版）、ID 18 字，PS 2020 开档「程序错误」（二分实测：只有带 Patt 的样品坏）。
+   PATT_LAYOUT 是正式写法；o.pattLayout 只给复测样品换写法。alpha：auto＝有透明才写最后一槽｜last＝一律写最后一槽｜mask＝写倒数第二槽（旧）｜none */
+const PATT_LAYOUT = {slots:24, rle:true, alpha:'auto', uuid:true};
+function pattEntry(p, L){
+  const W = p.width | 0, H = p.height | 0, w = new Wr().u32(1).u32(3).u16(H).u16(W); uniStr(w, p.name || 'Pattern'); w.raw(pascal(pattIdOf(p.id), 1));
+  const ch = c => { const a = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) a[i] = p.px[i * 4 + c]; return a; };
+  const vma = (w2, c) => { const d = L.rle ? rlePlane(ch(c), W, H, false, false).data : ch(c); w2.u32(1).u32(4 + 16 + 2 + 1 + d.length).u32(8).u32(0).u32(0).u32(H).u32(W).u16(8).u8(L.rle ? 1 : 0).raw(d); };
+  let hasA = false; for (let i = 3; i < W * H * 4 && !hasA; i += 4) hasA = p.px[i] < 255;
+  const aSlot = L.alpha === 'last' || (L.alpha === 'auto' && hasA) ? L.slots + 1 : L.alpha === 'mask' ? L.slots : -1;
+  const list = new Wr(); list.u32(0).u32(0).u32(H).u32(W).u32(L.slots);
+  for (let k = 0; k < L.slots + 2; k++){ if (k < 3) vma(list, k); else if (k === aSlot) vma(list, 3); else list.u32(0); }
+  const lb = list.bytes(); w.u32(3).u32(lb.length).raw(lb);
+  const b = w.bytes(), o = new Wr().u32(b.length).raw(b); for (let i = 0; i < pad4(b.length); i++) o.u8(0);
+  return o.bytes();
+}
+/* 图像资源一笔：8BIM、id、名字（Pascal 补偶数）、长度、资料（补偶数） */
+function resBlock(w, id, data, name){ w.latin('8BIM').u16(id).raw(pascal(name || '', 2)).u32(data.length).raw(data); if (data.length % 2) w.u8(0); }
 
 function encode(o){
   const W = o.width | 0, H = o.height | 0, N = W * H, items = o.items || [], big = !!o.psb;
+  pattLay = Object.assign({}, PATT_LAYOUT, o.pattLayout || {});
   const out = new Wr(), len8 = (w, v) => (big ? w.u64(v) : w.u32(v));
   out.latin('8BPS').u16(big ? 2 : 1).u32(0).u16(0).u16(4).u32(H).u32(W).u16(8).u16(3);
   out.u32(0);                                                                  // 色彩模式资料
   const res = new Wr(), dpi = Math.max(1, +o.dpi || 72);
   res.latin('8BIM').u16(0x03ED).u16(0).u32(16).u32(Math.round(dpi * 65536)).u16(1).u16(1).u32(Math.round(dpi * 65536)).u16(1).u16(1);
+  // 参考线（1032）：版本 1、格线周期、条数；每条＝位置（1/32 像素）＋方向（0 垂直、1 水平）
+  const guides = (o.guides || []).filter(g => g && isFinite(+g.pos));
+  if (guides.length){ const g = new Wr().u32(1).u32(576).u32(576).u32(guides.length); for (const q of guides) g.i32(Math.round(+q.pos * 32)).u8(q.vertical ? 0 : 1); resBlock(res, 1032, g.bytes()); }
+  if (o.icc && o.icc.length) resBlock(res, 1039, o.icc);                          // 档内 ICC 配置文件
+  // 存储路径（2000 起，名字在资源名）：同矢量蒙版的路径记录，没有前面 8 位元组
+  (o.paths || []).filter(p => p && p.paths && p.paths.length).slice(0, 998).forEach((p, i) => { const w = new Wr(); pathRecords(w, p.paths, p.evenOdd, W, H); resBlock(res, 2000 + i, w.bytes(), p.name || 'Path ' + (i + 1)); });
   const rb = res.bytes(); out.u32(rb.length).raw(rb);
   // 图层与蒙版
   const recs = new Wr(), chans = [];
@@ -292,6 +565,9 @@ function encode(o){
       if (it.shape.stroke || !it.shape.fill) addInfo(ex, 'vstk', vstkBlock(it.shape));
       addInfo(ex, 'vmsk', vmskBlock(it.shape, W, H));
     }
+    if (!isEnd && !isGroup && it.adjust && ADJ_KEY[it.adjust.kind]) for (const [k, b] of adjBlocks(it.adjust)) addInfo(ex, k, b);
+    if (!isEnd && !isGroup && it.smart){ addInfo(ex, 'PlLd', plLdBlock(it.smart)); addInfo(ex, 'SoLd', soLdBlock(it.smart)); }
+    if (!isEnd && !it.shape && it.vmask) addInfo(ex, 'vmsk', vmskBlock(it.vmask, W, H, (it.vmask.inverted ? 1 : 0) | (it.vmask.linked === false ? 2 : 0) | (it.vmask.enabled === false ? 4 : 0)));
     const eb = ex.bytes(); recs.u32(eb.length).raw(eb);
     chans.push(chList);
   }
@@ -303,6 +579,12 @@ function encode(o){
     layerInfo = li.bytes(); if (layerInfo.length % 2){ const t = new Uint8Array(layerInfo.length + 1); t.set(layerInfo); layerInfo = t; }
   }
   const lm = new Wr(); len8(lm, layerInfo.length); lm.raw(layerInfo).u32(0);
+  // 文件级附加资讯：图案（样式引用到的，按唯一 ID 去重）、内嵌档（lnk2：PSB 长度栏 8 位元组）
+  const pats = new Map();
+  for (const it of items) for (const e of (it.fx || [])){ const p = e.kind === 'patternOverlay' ? e.pattern : e.kind === 'bevelEmboss' && e.texture ? e.texture.pattern : null; if (p && p.id && p.px && !pats.has(p.id)) pats.set(p.id, p); }
+  if (pats.size){ const pw = new Wr(); for (const p of pats.values()) pw.raw(pattEntry(p, pattLay)); const pb = pw.bytes(); lm.latin('8BIM').latin('Patt').u32(pb.length).raw(pb); }
+  const linked = (o.linked || []).filter(f => f && f.id && f.data && f.data.length);
+  if (linked.length){ const lw = new Wr(); for (const f of linked) lw.raw(lnk2Entry(f)); const lb = lw.bytes(); lm.latin('8BIM').latin('lnk2'); len8(lm, lb.length); lm.raw(lb); }
   const lmb = lm.bytes(); len8(out, lmb.length); out.raw(lmb);
   // 合成图：RLE，R G B A
   out.u16(1);
@@ -474,9 +756,16 @@ function readTySh(u8, dv, s){
 }
 /* 图层样式 ⇒ [{kind, enabled, blend, color, opacity(%), angle, useGlobalLight, distance, spread(%), size, …}]（effectFromParams 的参数单位） */
 const FX_BLEND_OF = {}; Object.keys(FX_BLEND).forEach(k => { FX_BLEND_OF[FX_BLEND[k]] = k; });
-const FX_KIND_OF = {DrSh:'dropShadow', IrSh:'innerShadow', OrGl:'outerGlow', IrGl:'innerGlow', FrFX:'stroke', SoFi:'colorOverlay'};
-const FX_MULTI = {dropShadowMulti:'DrSh', innerShadowMulti:'IrSh', frameFXMulti:'FrFX', solidFillMulti:'SoFi'};
-function readLfx2(u8, dv, s, globalAngle){
+const FX_KIND_OF = {DrSh:'dropShadow', IrSh:'innerShadow', OrGl:'outerGlow', IrGl:'innerGlow', FrFX:'stroke', SoFi:'colorOverlay', GrFl:'gradientOverlay', ChFX:'satin', patternFill:'patternOverlay', ebbl:'bevelEmboss'};
+const FX_MULTI = {dropShadowMulti:'DrSh', innerShadowMulti:'IrSh', frameFXMulti:'FrFX', solidFillMulti:'SoFi', gradientFillMulti:'GrFl'};
+/* 渐变（只收两个色标、不透明度全满的；其余回 null＝外面另列 skipped） */
+function readGrad(e, uv){
+  const g = e.Grad, cs = g && Array.isArray(g.Clrs) ? g.Clrs : null; if (!cs || cs.length !== 2) return null;
+  if (Array.isArray(g.Trns) && g.Trns.some(t => t && t.Opct && uv(t.Opct) < 100)) return null;
+  const hex = c => { const v = rgbOfDesc(c); return v ? rgbHex(v) : null; }, from = hex(cs[0]['Clr ']), to = hex(cs[1]['Clr ']); if (!from || !to) return null;
+  return {from, to, style:GRAD_STYLE[e.Type && e.Type.value] || 'linear', angle:e.Angl !== undefined ? uv(e.Angl) : 90, scale:e['Scl '] !== undefined ? uv(e['Scl ']) : 100, reverse:!!e.Rvrs};
+}
+function readLfx2(u8, dv, s, globalAngle, globalAltitude){
   const [D] = rDesc(u8, dv, s + 8);
   const items = [], skipped = [], uv = x => (x && typeof x === 'object' ? +x.value : +x) || 0;
   const one = (code, e) => {
@@ -491,8 +780,29 @@ function readLfx2(u8, dv, s, globalAngle){
       p.size = uv(e.blur); p[kind === 'outerGlow' ? 'spread' : 'choke'] = uv(e.Ckmt); p.range = e.Inpr !== undefined ? uv(e.Inpr) : 50;
       p.technique = e.GlwT && e.GlwT.value === 'PrBL' ? 'precise' : 'softer'; if (kind === 'innerGlow') p.source = e.glwS && e.glwS.value === 'SrcC' ? 'center' : 'edge';
     } else if (kind === 'stroke'){
-      if (e.PntT && e.PntT.value !== 'SClr'){ skipped.push('stroke ' + e.PntT.value); return; }
+      const pt = e.PntT && e.PntT.value;
+      if (pt && pt !== 'SClr' && pt !== 'GrFl'){ skipped.push('stroke ' + pt); return; }
+      if (pt === 'GrFl'){ const g = readGrad(e, uv); if (!g){ skipped.push('stroke gradient'); return; } Object.assign(p, g); }   // 渐变描边：from／to 等（effectFromParams 有 from 就当渐变）
       p.size = uv(e['Sz  '] !== undefined ? e['Sz  '] : e['Sz ']); const sv = e.Styl && e.Styl.value; p.position = sv === 'InsF' ? 'inside' : sv === 'CtrF' ? 'center' : 'outside';
+    } else if (kind === 'gradientOverlay'){
+      const g = readGrad(e, uv); if (!g){ skipped.push('gradientOverlay gradient'); return; } delete p.color; Object.assign(p, g);
+    } else if (kind === 'satin'){
+      p.angle = uv(e.lagl); p.distance = uv(e.Dstn); p.size = uv(e.blur); p.invert = e.Invr !== false;
+    } else if (kind === 'patternOverlay'){
+      const r = e.Ptrn || {}; delete p.color;
+      Object.assign(p, {pattern:String(r.Idnt || ''), patternName:String(r['Nm  '] || ''), angle:e.Angl !== undefined ? uv(e.Angl) : 0, scale:e['Scl '] !== undefined ? uv(e['Scl ']) : 100, link:e.Algn !== false,
+        phaseX:e.phase ? +e.phase.Hrzn || 0 : 0, phaseY:e.phase ? +e.phase.Vrtc || 0 : 0});
+    } else if (kind === 'bevelEmboss'){
+      const hx = c => { const v = rgbOfDesc(c); return v ? rgbHex(v) : undefined; }, bl = m => m ? FX_BLEND_OF[m.value] : undefined;
+      delete p.color; delete p.blend; delete p.opacity;
+      Object.assign(p, {style:BVL_STYLE_OF[e.bvlS && e.bvlS.value] || 'inner', technique:BVL_TECH_OF[e.bvlT && e.bvlT.value] || 'smooth', depth:e.srgR !== undefined ? uv(e.srgR) : 100,
+        direction:e.bvlD && e.bvlD.value === 'Out ' ? 'down' : 'up', size:uv(e.blur), soften:uv(e.Sftn), useGlobalLight:!!e.uglg,
+        angle:e.uglg && globalAngle !== undefined ? globalAngle : uv(e.lagl), altitude:e.uglg && globalAltitude !== undefined ? globalAltitude : (e.Lald !== undefined ? uv(e.Lald) : 30),
+        highlightColor:hx(e.hglC), highlightBlend:bl(e.hglM), highlightOpacity:e.hglO !== undefined ? uv(e.hglO) : 75,
+        shadowColor:hx(e.sdwC), shadowBlend:bl(e.sdwM), shadowOpacity:e.sdwO !== undefined ? uv(e.sdwO) : 75});
+      if (e.useShape) Object.assign(p, {contour:true, contourRange:e.Inpr !== undefined ? uv(e.Inpr) : 50});
+      if (e.useTexture && e.Ptrn) Object.assign(p, {texture:String(e.Ptrn.Idnt || ''), textureName:String(e.Ptrn['Nm  '] || ''), textureScale:e['Scl '] !== undefined ? uv(e['Scl ']) : 100,
+        textureDepth:e.textureDepth !== undefined ? uv(e.textureDepth) : 100, textureInvert:!!e.InvT, textureLink:e.Algn !== false});
     }
     items.push(p);
   };
@@ -539,8 +849,55 @@ function readVmsk(dv, s, end, W, H){
       cur.knots.push({pre:[f(1) * W, f(0) * H], a:[f(3) * W, f(2) * H], post:[f(5) * W, f(4) * H]});
     }
   }
-  if (flags & 1) return null;                                          // 反相的路径：画板表达不了
-  return {paths:paths.filter(p => p.knots.length >= 2), evenOdd};
+  return {paths:paths.filter(p => p.knots.length >= 2), evenOdd, flags};   // flags：1 反相、2 不链接、4 停用
+}
+/* 图像资源里的路径（存储路径 2000–2997、工作路径 1025）：同 vmsk 的记录，没有前面 8 位元组 */
+function readPathRes(dv, s, end, W, H){ const r = readVmsk(dv, s - 8, end, W, H); return r && r.paths.length ? {paths:r.paths, evenOdd:r.evenOdd} : null; }
+/* ICC 配置文件的描述（desc：v2 textDescriptionType 或 v4 mluc） */
+function iccDesc(b){
+  try {
+    const d = new DataView(b.buffer, b.byteOffset, b.byteLength), n = d.getUint32(128);
+    for (let i = 0; i < n; i++){
+      const q = 132 + i * 12; if (String.fromCharCode(b[q], b[q + 1], b[q + 2], b[q + 3]) !== 'desc') continue;
+      const off = d.getUint32(q + 4), ty = String.fromCharCode(b[off], b[off + 1], b[off + 2], b[off + 3]);
+      if (ty === 'desc'){ const len = d.getUint32(off + 8); let s = ''; for (let k = 0; k < len; k++) s += String.fromCharCode(b[off + 12 + k]); return s.replace(/\u0000+$/, ''); }
+      if (ty === 'mluc'){ const len = d.getUint32(off + 20), o2 = off + d.getUint32(off + 24); let s = ''; for (let k = 0; k + 1 < len; k += 2) s += String.fromCharCode(d.getUint16(o2 + k)); return s.replace(/\u0000+$/, ''); }
+    }
+  } catch (_){ }
+  return null;
+}
+/* lnk2／lnkD／lnk3：内嵌档（liFD）⇒ [{id, name, type, data}]（链接到外面的 liFE／liFA 没有内容，只记名字） */
+function readLinked(u8, dv, s, end, out){
+  let o = s;
+  while (o + 12 <= end){
+    const len = dv.getUint32(o) * 4294967296 + dv.getUint32(o + 4), st = o + 8, en = st + len; if (!len || en > end) break;
+    try {
+      const ty = String.fromCharCode(u8[st], u8[st + 1], u8[st + 2], u8[st + 3]); let q = st + 8;
+      const nl = u8[q]; let id = ''; for (let k = 0; k < nl; k++) id += String.fromCharCode(u8[q + 1 + k]); q += 1 + nl;
+      const cn = dv.getUint32(q); let name = ''; for (let k = 0; k < cn; k++) name += String.fromCharCode(dv.getUint16(q + 4 + k * 2)); q += 4 + cn * 2; name = name.replace(/\u0000+$/, '');
+      const ftype = String.fromCharCode(u8[q], u8[q + 1], u8[q + 2], u8[q + 3]); q += 8;
+      const dl = dv.getUint32(q) * 4294967296 + dv.getUint32(q + 4); q += 8;
+      if (u8[q++]){ q += 4; q = rDesc(u8, dv, q)[1]; }
+      out.push({id, name, type:ftype, data:ty === 'liFD' ? u8.slice(q, q + dl) : null});
+    } catch (_){ }
+    o = Math.min(end, en + pad4(len));               // 各笔补到 4 的倍数
+  }
+}
+/* PlLd（plcL）：唯一 ID＋四角；SoLd（soLD）：描述子的 Idnt、Trnf、Sz */
+function readPlLd(u8, dv, s){
+  if (String.fromCharCode(u8[s], u8[s + 1], u8[s + 2], u8[s + 3]) !== 'plcL') return null;
+  let q = s + 8; const nl = u8[q]; let id = ''; for (let k = 0; k < nl; k++) id += String.fromCharCode(u8[q + 1 + k]); q += 1 + nl + 16;
+  const corners = []; for (let k = 0; k < 8; k++) corners.push(dv.getFloat64(q + k * 8));
+  return {id, corners};
+}
+function readSoLd(u8, dv, s){
+  if (String.fromCharCode(u8[s], u8[s + 1], u8[s + 2], u8[s + 3]) !== 'soLD') return null;
+  const [D] = rDesc(u8, dv, s + 12), t = Array.isArray(D.Trnf) ? D.Trnf.map(Number) : null, sz = D['Sz  '] || {};
+  // 只有仿射（四角是平行四边形、非仿射四角＝仿射四角）、没变形、没智能滤镜的，画板才接得成智能对象；其余 plain:false（照像素）
+  const na = Array.isArray(D.nonAffineTransform) ? D.nonAffineTransform.map(Number) : null, warp = D.warp && D.warp.warpStyle && D.warp.warpStyle.value;
+  const para = t && t.length === 8 && Math.abs(t[4] - (t[2] + t[6] - t[0])) < 0.01 && Math.abs(t[5] - (t[3] + t[7] - t[1])) < 0.01;
+  const plain = !!para && (!na || na.every((v, i) => Math.abs(v - t[i]) < 0.01)) && (!warp || warp === 'warpNone') && !D.filterFX;
+  return {id:String(D.Idnt || ''), corners:t && t.length === 8 ? t : null, w:+sz.Wdth || 0, h:+sz.Hght || 0, plain};
 }
 
 async function decode(buf){
@@ -556,9 +913,19 @@ async function decode(buf){
   if (![1, 8, 16, 32].includes(depth)) throw new Bad('PSD bit depth ' + depth + ' is not supported');
   if (![0, 1, 2, 3, 4, 8, 9].includes(mode)) throw new Bad('PSD color mode ' + mode + ' (multichannel) is not supported');
   const cmLen = u32(); const palette = mode === 2 && cmLen >= 768 ? u8.slice(o, o + 768) : null; o += cmLen;
-  const resLen = u32(); let transIdx = -1, gAngle, gAlt;
-  { const end = o + resLen; let q = o;                                   // 图像资源：只看索引色的透明索引（0x0417）
-    while (q + 12 <= end && d.getUint32(q) === 0x3842494d){ const id = d.getUint16(q + 4), nl = u8[q + 6], q2 = q + 6 + nl + 1 + ((nl + 1) % 2); const sz = d.getUint32(q2); if (id === 0x0417 && sz >= 2) transIdx = d.getUint16(q2 + 4); if (id === 0x040D && sz >= 4) gAngle = d.getInt32(q2 + 4); if (id === 0x0419 && sz >= 4) gAlt = d.getInt32(q2 + 4); q = q2 + 4 + sz + (sz % 2); }
+  const resLen = u32(); let transIdx = -1, gAngle, gAlt, icc = null; const guides = [], paths = [], linked = [];
+  { const end = o + resLen; let q = o;                                   // 图像资源：索引色透明索引、全局光、参考线、ICC、路径
+    while (q + 12 <= end && d.getUint32(q) === 0x3842494d){
+      const id = d.getUint16(q + 4), nl = u8[q + 6], q2 = q + 6 + nl + 1 + ((nl + 1) % 2); const sz = d.getUint32(q2), s = q2 + 4;
+      if (id === 0x0417 && sz >= 2) transIdx = d.getUint16(s); if (id === 0x040D && sz >= 4) gAngle = d.getInt32(s); if (id === 0x0419 && sz >= 4) gAlt = d.getInt32(s);
+      if (id === 1032 && sz >= 16){ const n = d.getUint32(s + 12); for (let k = 0; k < n && s + 16 + k * 5 + 5 <= s + sz; k++) guides.push({vertical:u8[s + 16 + k * 5 + 4] === 0, pos:d.getInt32(s + 16 + k * 5) / 32}); }
+      if (id === 1039 && sz > 132) icc = u8.slice(s, s + sz);
+      if ((id >= 2000 && id <= 2997) || id === 1025){
+        let name = ''; try { name = decodeURIComponent(escape(String.fromCharCode(...u8.subarray(q + 7, q + 7 + nl)))); } catch (_){ name = String.fromCharCode(...u8.subarray(q + 7, q + 7 + nl)); }
+        try { const r = readPathRes(d, s, s + sz, W, H); if (r) paths.push(Object.assign({id, name:id === 1025 ? (name || 'Work Path') : name, work:id === 1025}, r)); } catch (_){ }
+      }
+      q = s + sz + (sz % 2);
+    }
     o = end; }
   const lmLen = len8(ver), lmEnd = o + lmLen, records = [];
   if (lmLen > 0){
@@ -597,7 +964,11 @@ async function decode(buf){
           else if (key === 'iOpa') rec.fillOpacity = u8[s] / 255;
           else if (key === 'TySh'){ rec.text = true; try { rec.liveText = readTySh(u8, d, s); } catch (e){ rec.liveText = null; } }
           else if (key === 'tySh') rec.text = true;
-          else if (key === 'lfx2'){ try { rec.fx = readLfx2(u8, d, s, gAngle); } catch (e){ rec.fx = null; } }
+          else if (key === 'lfx2'){ try { rec.fx = readLfx2(u8, d, s, gAngle, gAlt); } catch (e){ rec.fx = null; } }
+          else if (ADJ_KIND_OF[key]){ rec._adj = {key, s, L}; }
+          else if (key === 'CgEd'){ try { (rec._adjx = rec._adjx || {}).CgEd = rDesc(u8, d, s + 4)[0]; } catch (e){ } }
+          else if (key === 'PlLd'){ try { const v = readPlLd(u8, d, s); if (v) rec._plld = v; } catch (e){ } }
+          else if (key === 'SoLd'){ try { const v = readSoLd(u8, d, s); if (v) rec._sold = v; } catch (e){ } }
           else if (key === 'SoCo'){ try { rec._soco = readSoCo(u8, d, s); } catch (e){ rec._soco = null; } }
           else if (key === 'vscg'){ try { const v = readVscg(u8, d, s); if (rec._soco === undefined) rec._soco = v === undefined ? null : v; } catch (e){ rec._soco = null; } }
           else if (key === 'vstk'){ try { rec._vstk = readVstk(u8, d, s); } catch (e){ rec._vstk = null; } }
@@ -605,12 +976,17 @@ async function decode(buf){
           o = s + L; if (ver === 1 && L % 2 && key !== 'luni') { /* 规范要偶数补齐；多数档已含在长度里 */ }
         }
         o = exEnd;
-        // 形状图层＝有填色内容（SoCo／vscg）＋路径；只有路径没填色＝像素层的矢量蒙版，照旧用像素
-        if (rec._soco !== undefined && rec._vmsk && rec._vmsk.paths.length){
+        // 形状图层＝有填色内容（SoCo／vscg）＋路径（不反相）；只有路径没填色＝像素层的矢量蒙版（rec.vmask）
+        if (rec._soco !== undefined && rec._vmsk && rec._vmsk.paths.length && !(rec._vmsk.flags & 1)){
           const st = rec._vstk || {stroke:null, fillEnabled:true};
           if (rec._soco || st.stroke) rec.shape = {fill:rec._soco, fillEnabled:st.fillEnabled, stroke:st.stroke, evenOdd:rec._vmsk.evenOdd, paths:rec._vmsk.paths};
         }
-        delete rec._soco; delete rec._vstk; delete rec._vmsk;
+        if (!rec.shape && rec._soco === undefined && rec._vmsk) rec.vmask = {paths:rec._vmsk.paths, evenOdd:rec._vmsk.evenOdd, inverted:!!(rec._vmsk.flags & 1), linked:!(rec._vmsk.flags & 2), enabled:!(rec._vmsk.flags & 4)};
+        if (rec._adj){ try { rec.adjust = readAdj(rec._adj.key, u8, d, rec._adj.s, rec._adj.L, rec._adjx); } catch (e){ rec.adjust = null; } }
+        // 智能对象：SoLd 优先（PS 2020 两个都写），四角、来源大小；内嵌档在文件级 lnk2（下面读）
+        const pl = rec._sold && rec._sold.corners ? rec._sold : rec._plld ? Object.assign({w:0, h:0}, rec._plld, rec._sold && rec._sold.id ? {id:rec._sold.id} : {}) : null;
+        if (pl && pl.id) rec.placed = pl;
+        delete rec._soco; delete rec._vstk; delete rec._vmsk; delete rec._adj; delete rec._adjx; delete rec._plld; delete rec._sold;
         records.push(rec);
       }
       for (const rec of records){
@@ -630,6 +1006,19 @@ async function decode(buf){
         delete rec.chs;
       }
     }
+    // 文件级附加资讯（全域图层蒙版之后）：内嵌档 lnk2／lnkD／lnk3（PSB 的 lnk2 长度 8 位元组）；各块补到 4 的倍数
+    try {
+      let q = liEnd; if (q + 4 <= lmEnd){ q += 4 + d.getUint32(q); }
+      while (q + 12 <= lmEnd){
+        const sig = String.fromCharCode(u8[q], u8[q + 1], u8[q + 2], u8[q + 3]);
+        if (sig !== '8BIM' && sig !== '8B64'){ q++; continue; }
+        const key = String.fromCharCode(u8[q + 4], u8[q + 5], u8[q + 6], u8[q + 7]);
+        const big = ver === 2 && ['LMsk', 'Lr16', 'Lr32', 'Layr', 'Mt16', 'Mt32', 'Mtrn', 'Alph', 'FMsk', 'lnk2', 'FEid', 'FXid', 'PxSD'].includes(key);
+        const L = big ? d.getUint32(q + 8) * 4294967296 + d.getUint32(q + 12) : d.getUint32(q + 8), s = q + (big ? 16 : 12);
+        if (key === 'lnk2' || key === 'lnkD' || key === 'lnk3') readLinked(u8, d, s, Math.min(lmEnd, s + L), linked);
+        q = s + L;
+      }
+    } catch (e){ console.warn('[PSD] global layer info unreadable', e); }
     o = lmEnd;
   }
   // 合成图
@@ -661,8 +1050,8 @@ async function decode(buf){
       // 有图层的档：合成图的透明度在第一个 alpha（图层数为负）；没 alpha 的就是不透明
     }
   } catch (e){ if (e instanceof Bad) throw e; console.warn('[PSD] composite image unreadable', e); }
-  return {width:W, height:H, depth, mode, merged, records, globalAngle:gAngle, globalAltitude:gAlt};
+  return {width:W, height:H, depth, mode, merged, records, globalAngle:gAngle, globalAltitude:gAlt, guides, paths, icc, iccDescription:icc ? iccDesc(icc) : null, linked};
 }
 
-window.PsdIO = {encode, decode, BLEND_KEYS, BLEND_OF, Bad};
+window.PsdIO = {encode, decode, BLEND_KEYS, BLEND_OF, Bad, ADJ_KEY, patId, PATT_LAYOUT};
 })();

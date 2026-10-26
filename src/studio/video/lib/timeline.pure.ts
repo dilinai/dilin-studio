@@ -11,6 +11,8 @@
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 import type { ShapeBody, SolidBody } from './shape.pure'
 import type { BgfxBody } from './bgfx.pure' // 动态背景（只引型别）
+import type { Clip3d, RigBody } from './rig.pure' // 空物件／摄影机／灯光·3D（只引型别）
+import type { ClipExpr } from './expr.pure' // 表达式（只引型别）
 import { unusedCopyGroupId } from './id.pure'
 import type { ClipLook } from './clip-look.pure' // 片段画面属性（只引型别）
 import type { KfTracks } from './keyframe.pure' // 关键帧（只引型别）
@@ -96,7 +98,11 @@ export type TlClip = { id: string; mediaId: string; start: number; length: numbe
   mtrack?: MTrack[]; follow?: ClipFollow
   /** 画面轨素材片段身上的特效（可几个·由上往下依序套） */ fx?: ClipFx[]; /** 跟同轨前一段接缝上的转场；前面没接着别段 ⇒ 片头转场（从黑场进场·见 fx.pure fxStateAt） */ transIn?: TransBody
   /** 形状片段（画面轨·mediaId 空·见 shape.pure.ts）；纯色片段（画面轨·mediaId 空·整个画面一块颜色） */ shape?: ShapeBody; solid?: SolidBody
-  /** 程序画的动态背景片段（画面轨·mediaId 空·星空粒子／光斑漂移·见 bgfx.pure.ts） */ bgfx?: BgfxBody }
+  /** 程序画的动态背景片段（画面轨·mediaId 空·星空粒子／光斑漂移·见 bgfx.pure.ts） */ bgfx?: BgfxBody
+  /** 空物件／摄影机／灯光（画面轨·mediaId 空·自己不画·见 rig.pure.ts）；parent＝父层片段 id（位移缩放旋转沿父链级联）·parentAlpha＝连不透明度也跟；
+   *  d3＝开 3D（z、x／y／z 旋转·经摄影机透视投影、受灯光）；expr＝各属性的表达式（见 expr.pure.ts） */
+  rig?: RigBody; parent?: string; parentAlpha?: boolean; d3?: Clip3d; expr?: ClipExpr
+  /** 合成段（画面轨·mediaId 空）：放的是工程里哪份子合成（offset＝从合成第几秒起·变速倒放定格同素材片段·见 comp.pure.ts） */ comp?: string }
 /** markers＝时间尺上的标记（秒·对齐帧格·由小到大）——只主轨带（的加标记·放主轨上＝复原栈与工程档跟着轨道走；缺＝没有） */
 export type Lane = { id: string; kind: LaneKind; clips: TlClip[]; locked: boolean; hidden: boolean; muted: boolean; markers?: number[] }
 /** 所有轨道·由上到下排；主轨（id＝MAIN_LANE）永远在（空了也留）。
@@ -942,6 +948,7 @@ export function replaceMedia(tr: Tracks, ids: readonly string[], media: { id: st
 export type MenuAct = 'copy' | 'cut' | 'paste' | 'delete' | 'duplicate' | 'split' | 'detach' | 'mute' | 'disable' | 'replace' | 'find' | 'add-chat' | 'group' | 'ungroup' | 'subclip' | 'merge'
   | 'freeze' | 'reverse' | 'mirror' | 'copy-attr' | 'paste-attr'
   | 'stems' // 分离人声（复用 AI 分轨·人声／伴奏放回音频轨·见 vedit-clip-stems.pure）
+  | 'precomp' // 打包成合成（巢状合成·见 comp.pure precompose）
 /** group＝分隔线分的段；on＝静音／停用这几段已经全是（选单写成「取消静音」「启用这段」） */
 export type MenuItem = { act: MenuAct; group: number; enabled: boolean; on?: boolean }
 const isMediaClip = (c: TlClip) => !!c.mediaId && !c.text && !c.sticker && !c.filter && !c.program
@@ -970,6 +977,7 @@ export function clipMenu(tr: Tracks, ids: readonly string[], ctx: { kindOf: (med
     { act: 'subclip', group: 4, enabled: live.some((f) => sounding(f.clip)) },
     // 两段以上就亮（有画面的按了会说明还合不了）
     { act: 'merge', group: 4, enabled: live.length >= 2 },
+    { act: 'precomp', group: 4, enabled: live.length > 0 },
     { act: 'add-chat', group: 5, enabled: fs.length > 0 },
     // 定格（播放头压在画面轨影片上）·倒放（影片／音频）·镜像（画面轨素材）·复制／粘贴属性
     { act: 'freeze', group: 6, enabled: live.some((f) => f.lane.kind === 'visual' && !f.clip.freeze && isMediaClip(f.clip) && ctx.kindOf(f.clip.mediaId) === 'video' && ctx.playhead >= f.clip.start - EPS && ctx.playhead <= endOf(f.clip) + EPS) },

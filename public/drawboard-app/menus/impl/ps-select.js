@@ -663,7 +663,7 @@ function transformCompute(p){
   if (!b) return {error:'no selection'};
   const rect = (Array.isArray(p.rect) && p.rect.length === 4) ? p.rect.map(v => typeof v === 'number' ? v : 0) : b;
   const interp = parseInterp(typeof p.interpolation === 'string' ? p.interpolation : 'bilinear');
-  if (['warp', 'style', 'mesh', 'grid'].some(k => p[k] !== undefined)) return {error:'select.transformSelection: warp is not supported here (use quad / matrix / scale / rotate / skew / move)'};
+  if (['warp', 'style', 'mesh', 'grid'].some(k => p[k] !== undefined)) return {error:'select.transformSelection: warp goes through ps.select.transformSelection.warp (style / mesh / grid / warp)'};
   let hm;
   const q = quadParam(p);
   if (q){ hm = Hm.rectToQuad(rect, q); if (!hm) return {error:'select.transformSelection: degenerate quad'}; }
@@ -680,8 +680,9 @@ function transformCompute(p){
 CMD.reg('ps.select.transformSelection', {i18n:'', undoable:true,
   params:'{rect:[x0,y0,x1,y1]?（框；预设＝选区外框）, quad|corners:[[x,y]×4]?（框的四角要去哪：扭曲／透视）, matrix:[a,b,c,d,e,f]?（同 canvas setTransform）, ' +
          'scaleX:%=100, scaleY:%=100, rotate:度=0, skewX:度=0, skewY:度=0, dx:px=0, dy:px=0, reference:"center|topLeft|top|topRight|left|right|bottomLeft|bottom|bottomRight"|[x,y]="center", ' +
-         'interpolation:"bilinear|bicubic|nearest"="bilinear"} 变换选区：只变形选区遮罩、不动像素；跑出画布的部分切掉 → {ok, changed, selected, bounds:[x,y,w,h]|null}'},
+         'interpolation:"bilinear|bicubic|nearest"="bilinear", style|mesh|grid|warp?（给了＝变形，转给 ps.select.transformSelection.warp）} 变换选区：只变形选区遮罩、不动像素；跑出画布的部分切掉 → {ok, changed, selected, bounds:[x,y,w,h]|null}'},
   p => {
+    if (['warp', 'style', 'mesh', 'grid'].some(k => p[k] !== undefined) && CMD.map['ps.select.transformSelection.warp']) return CMD.map['ps.select.transformSelection.warp'].run(p);   // 变形（ps-edit.js）：历史已由这条 push 过
     const r = transformCompute(p);
     if (r.error) return fail(r.error);
     if (!r.changed) return {ok:true, changed:false, selected:true};

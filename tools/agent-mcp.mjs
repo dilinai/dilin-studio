@@ -83,7 +83,7 @@ export const TOOLS = [
   },
   {
     name: 'sheets_run',
-    description: 'Change one tab of the open spreadsheet with ops, all or none — the same engine as the website update_cells / format_cells / insert_rows / merge_cells / sort_range / set_chart / set_freeze / set_filter / set_validation. Each op is {op, …}: {"op":"set","range":"A1","values":[["Item","Qty"],["Apple",3]]} (a string starting with = is a formula); {"op":"format","range":"A1:B1","style":{"bold":true,"bg":"#fff3bf"}}; insert_rows {at,count}; delete_rows; insert_cols {at:"C"}; delete_cols; merge / unmerge {range}; sort {range,by:[{column,descending}],has_header}; resize {range,width|height}; set_chart / delete_chart; cond_format; freeze {rows,cols}; filter; validate. Pictures (add_image) need the website. The page saves and redraws right away.',
+    description: 'Change one tab of the open spreadsheet with ops, all or none — the same engine as the website update_cells / format_cells / insert_rows / merge_cells / sort_range / set_chart / set_freeze / set_filter / set_validation / find_replace / remove_duplicates / set_hidden. Each op is {op, …}: {"op":"set","range":"A1","values":[["Item","Qty"],["Apple",3]]} (a string starting with = is a formula); {"op":"format","range":"A1:B1","style":{"bold":true,"bg":"#fff3bf"}}; insert_rows {at,count}; delete_rows; insert_cols {at:"C"}; delete_cols; merge / unmerge {range}; sort {range,by:[{column,descending}],has_header}; resize {range,width|height}; set_chart / delete_chart; cond_format; freeze {rows,cols}; filter; validate; find {find,range?,match_case?,whole_cell?,look_in?} (lists matches, changes nothing); replace {find,replace,range?,include_formulas?}; dedupe {range,columns?,has_header?}; hide {rows?:\"5:9\",cols?:\"C\",hidden?,unhide_all?}. Pictures (add_image) need the website. The page saves and redraws right away.',
     inputSchema: { type: 'object', properties: { sheet: { type: 'string', description: 'Tab name or id (default: the first tab)' }, ops: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'object', additionalProperties: true } }, page: pageProp }, required: ['ops'], additionalProperties: false },
   },
   {
@@ -312,7 +312,7 @@ export function createAgentHub(o = {}) {
   async function cli(req, res) {
     let j
     try { j = JSON.parse(await readBody(req)) } catch (e) { return send(res, e.status || 400, { error: 'bad_json' }) }
-    const p = j && typeof j.page === 'string' ? [...pages.values()].find((x) => x.project === j.page || x.id === j.page) : pick(j && j.editor === 'video' ? 'video' : 'paint', null)
+    const p = j && typeof j.page === 'string' ? [...pages.values()].find((x) => x.project === j.page || x.id === j.page) : pick(j && ['video', 'docs', 'sheets', 'slides'].includes(j.editor) ? j.editor : 'paint', null)
     if (!p) return send(res, 404, { ok: false, error: 'no_page', pages: listPages() })
     if (!j.job || typeof j.job !== 'object' || typeof j.job.kind !== 'string') return send(res, 400, { error: 'bad_job' })
     const { id: _drop, ...job } = j.job
